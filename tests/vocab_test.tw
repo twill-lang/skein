@@ -1,0 +1,194 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/vocab.tw" as vb
+
+fn reserved_tokens_take_the_lowest_ids() {
+  let v: vb.Vocab = vb.new_vocab()
+  let r: Arr[Str] = ["[PAD]", "[UNK]", "[CLS]"]
+  let err: Str = vb.add_reserved(v, r, "[UNK]")
+  t.equal_str("reserving succeeded", err, "")
+  t.equal_i64("PAD is id 0", vb.id_of(v, "[PAD]"), 0)
+  t.equal_i64("UNK is id 1", vb.id_of(v, "[UNK]"), 1)
+  t.equal_i64("CLS is id 2", vb.id_of(v, "[CLS]"), 2)
+  t.equal_i64("the unknown id was recorded", v.unk_id, 1)
+  t.equal_i64("three ids are reserved", v.reserved, 3)
+  t.check("id 2 is reserved", vb.is_reserved(v, 2))
+  t.check("id 3 is not", not vb.is_reserved(v, 3))
+}
+
+fn reserving_into_a_non_empty_vocabulary_is_refused() {
+  let v: vb.Vocab = vb.new_vocab()
+  vb.add(v, "word")
+  let r: Arr[Str] = ["[PAD]"]
+  t.check("it returns a message", len(vb.add_reserved(v, r, "")) > 0)
+}
+
+fn naming_an_unknown_token_that_is_not_reserved_is_refused() {
+  let v: vb.Vocab = vb.new_vocab()
+  let r: Arr[Str] = ["[PAD]"]
+  t.check("it returns a message", len(vb.add_reserved(v, r, "[UNK]")) > 0)
+}
+
+fn an_absent_token_reads_as_minus_one_and_not_as_the_unknown_id() {
+  let v: vb.Vocab = vb.new_vocab()
+  let r: Arr[Str] = ["[UNK]"]
+  vb.add_reserved(v, r, "[UNK]")
+  t.equal_i64("id_of says absent", vb.id_of(v, "nope"), -1)
+  t.equal_i64("id_or_unk says unknown", vb.id_or_unk(v, "nope"), 0)
+}
+
+fn adding_the_same_token_twice_returns_the_same_id() {
+  let v: vb.Vocab = vb.new_vocab()
+  let a: I64 = vb.add(v, "cat")
+  let b: I64 = vb.add(v, "cat")
+  t.equal_i64("same id", a, b)
+  t.equal_i64("one token", vb.size(v), 1)
+}
+
+fn an_id_out_of_range_decodes_to_the_empty_string() {
+  let v: vb.Vocab = vb.new_vocab()
+  vb.add(v, "cat")
+  t.equal_str("negative", vb.token_of(v, -1), "")
+  t.equal_str("past the end", vb.token_of(v, 9), "")
+  t.equal_str("in range", vb.token_of(v, 0), "cat")
+}
+
+fn counting_keeps_the_first_seen_order() {
+  let c: vb.Counts = vb.new_counts()
+  vb.observe(c, "b", 1)
+  vb.observe(c, "a", 1)
+  vb.observe(c, "b", 2)
+  t.equal_i64("two distinct", vb.distinct(c), 2)
+  t.equal_str("b was seen first", c.keys[0], "b")
+  t.equal_i64("b was counted three times", vb.count_of(c, "b"), 3)
+  t.equal_i64("the total is four", c.total, 4)
+  t.equal_i64("an unseen token counts zero", vb.count_of(c, "z"), 0)
+}
+
+fn building_orders_by_descending_frequency() {
+  let c: vb.Counts = vb.new_counts()
+  vb.observe(c, "rare", 1)
+  vb.observe(c, "common", 10)
+  vb.observe(c, "middling", 5)
+  let r: Arr[Str] = ["[PAD]", "[UNK]"]
+  let v: vb.Vocab = vb.build(c, r, "[UNK]", 1, 0)
+  t.equal_str("the reserved come first", vb.token_of(v, 0), "[PAD]")
+  t.equal_str("then the most frequent", vb.token_of(v, 2), "common")
+  t.equal_str("then the next", vb.token_of(v, 3), "middling")
+  t.equal_str("then the rarest", vb.token_of(v, 4), "rare")
+  t.equal_i64("the frequency was carried over", v.freqs[2], 10)
+}
+
+fn a_tie_is_broken_by_the_token_bytes_and_not_by_corpus_order() {
+  let c: vb.Counts = vb.new_counts()
+  vb.observe(c, "zebra", 4)
+  vb.observe(c, "apple", 4)
+  let r: Arr[Str] = []
+  let v: vb.Vocab = vb.build(c, r, "", 1, 0)
+  t.equal_str("apple sorts before zebra despite being seen second",
+              vb.token_of(v, 0), "apple")
+  t.equal_str("and zebra follows", vb.token_of(v, 1), "zebra")
+}
+
+fn the_minimum_frequency_cutoff_drops_the_tail() {
+  let c: vb.Counts = vb.new_counts()
+  vb.observe(c, "keep", 3)
+  vb.observe(c, "drop", 1)
+  let r: Arr[Str] = ["[UNK]"]
+  let v: vb.Vocab = vb.build(c, r, "[UNK]", 2, 0)
+  t.equal_i64("only the reserved token and keep", vb.size(v), 2)
+  t.check("keep survived", vb.contains(v, "keep"))
+  t.check("drop did not", not vb.contains(v, "drop"))
+}
+
+fn the_maximum_size_counts_the_reserved_tokens() {
+  let c: vb.Counts = vb.new_counts()
+  vb.observe(c, "a", 5)
+  vb.observe(c, "b", 4)
+  vb.observe(c, "c", 3)
+  let r: Arr[Str] = ["[PAD]", "[UNK]"]
+  let v: vb.Vocab = vb.build(c, r, "[UNK]", 1, 4)
+  t.equal_i64("four tokens in total", vb.size(v), 4)
+  t.check("the two most frequent got in", vb.contains(v, "a"))
+  t.check("and the second", vb.contains(v, "b"))
+  t.check("the third did not", not vb.contains(v, "c"))
+}
+
+fn a_cutoff_never_removes_a_reserved_token() {
+  let c: vb.Counts = vb.new_counts()
+  vb.observe(c, "x", 100)
+  let r: Arr[Str] = ["[PAD]", "[UNK]"]
+  let v: vb.Vocab = vb.build(c, r, "[UNK]", 50, 0)
+  t.check("PAD survived a cutoff it could never meet", vb.contains(v, "[PAD]"))
+}
+
+fn hex_round_trips_every_byte_including_the_awkward_ones() {
+  let s: Str = "a b" + chr(0) + chr(10) + chr(255)
+  t.equal_str("round trip", vb.from_hex(vb.to_hex(s)), s)
+  t.equal_str("a known encoding", vb.to_hex("AB"), "4142")
+  t.check("an odd-length hex string is rejected", not vb.hex_ok("abc"))
+  t.check("a non-hex character is rejected", not vb.hex_ok("zz"))
+  t.check("uppercase hex is accepted on read", vb.hex_ok("4142"))
+}
+
+fn a_vocabulary_round_trips_through_its_file_format() {
+  let c: vb.Counts = vb.new_counts()
+  vb.observe(c, "cat", 3)
+  vb.observe(c, " ", 9)
+  vb.observe(c, chr(10), 2)
+  let r: Arr[Str] = ["[PAD]", "[UNK]"]
+  let v: vb.Vocab = vb.build(c, r, "[UNK]", 1, 0)
+  let blob: Str = vb.save(v)
+
+  let w: vb.Vocab = vb.new_vocab()
+  let err: Str = vb.load(blob, w)
+  t.equal_str("it loaded", err, "")
+  t.equal_i64("the same size", vb.size(w), vb.size(v))
+  t.equal_i64("the same reserved count", w.reserved, v.reserved)
+  t.equal_i64("the same unknown id", w.unk_id, v.unk_id)
+  t.equal_i64("a space kept its id", vb.id_of(w, " "), vb.id_of(v, " "))
+  t.equal_i64("a newline kept its id", vb.id_of(w, chr(10)), vb.id_of(v, chr(10)))
+  t.equal_str("and saving it again gives the same bytes", vb.save(w), blob)
+}
+
+fn a_corrupt_vocabulary_file_names_the_line() {
+  let w: vb.Vocab = vb.new_vocab()
+  t.check("a bad magic line is refused",
+          len(vb.load("nope\nreserved 0\nunk -1\n", w)) > 0)
+  t.check("a missing reserved line is refused",
+          len(vb.load("skein-vocab 1\nx\nunk -1\n", w)) > 0)
+  t.check("an odd-length token is refused",
+          len(vb.load("skein-vocab 1\nreserved 0\nunk -1\nabc 1\n", w)) > 0)
+  t.check("a line with no space is refused",
+          len(vb.load("skein-vocab 1\nreserved 0\nunk -1\n4142\n", w)) > 0)
+  t.check("a duplicate token is refused",
+          len(vb.load("skein-vocab 1\nreserved 0\nunk -1\n41 1\n41 2\n", w)) > 0)
+  t.check("an unknown id past the end is refused",
+          len(vb.load("skein-vocab 1\nreserved 0\nunk 9\n41 1\n", w)) > 0)
+}
+
+fn byte_lexicographic_order_puts_a_prefix_first() {
+  t.check("cat before cats", vb.str_less("cat", "cats"))
+  t.check("cat before cau", vb.str_less("cat", "cau"))
+  t.check("not the reverse", not vb.str_less("cats", "cat"))
+  t.check("equal is not less", not vb.str_less("cat", "cat"))
+}
+
+reserved_tokens_take_the_lowest_ids()
+reserving_into_a_non_empty_vocabulary_is_refused()
+naming_an_unknown_token_that_is_not_reserved_is_refused()
+an_absent_token_reads_as_minus_one_and_not_as_the_unknown_id()
+adding_the_same_token_twice_returns_the_same_id()
+an_id_out_of_range_decodes_to_the_empty_string()
+counting_keeps_the_first_seen_order()
+building_orders_by_descending_frequency()
+a_tie_is_broken_by_the_token_bytes_and_not_by_corpus_order()
+the_minimum_frequency_cutoff_drops_the_tail()
+the_maximum_size_counts_the_reserved_tokens()
+a_cutoff_never_removes_a_reserved_token()
+hex_round_trips_every_byte_including_the_awkward_ones()
+a_vocabulary_round_trips_through_its_file_format()
+a_corrupt_vocabulary_file_names_the_line()
+byte_lexicographic_order_puts_a_prefix_first()
+t.report("skein vocab")

@@ -1,0 +1,171 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/unigram.tw" as ug
+import "../src/vocab.tw" as vb
+import "../src/pieces.tw" as pc
+import "../src/pretok.tw" as pt
+
+fn build(words: Arr[Str]) -> vb.Vocab {
+  let v: vb.Vocab = vb.new_vocab()
+  let r: Arr[Str] = ["[UNK]"]
+  vb.add_reserved(v, r, "[UNK]")
+  let i: I64 = 0
+  while i < len(words) {
+    vb.add(v, words[i])
+    i = i + 1
+  }
+  v
+}
+
+# The test the Viterbi exists for. Greedy longest-match from the left would take
+# "ab" and be forced onto two single characters for "cd", scoring -0.1 - 4 - 4.
+# The optimum takes "a" then "bcd", scoring -2 - 2. A greedy encoder gets this
+# wrong and nothing about its output looks wrong.
+fn the_viterbi_beats_the_greedy_split() {
+  let v: vb.Vocab = build(["a", "b", "c", "d", "ab", "bcd"])
+  let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -20.0)
+  ug.set_logp(m, "a", -2.0)
+  ug.set_logp(m, "b", -4.0)
+  ug.set_logp(m, "c", -4.0)
+  ug.set_logp(m, "d", -4.0)
+  ug.set_logp(m, "ab", -0.1)
+  ug.set_logp(m, "bcd", -2.0)
+  let p: pc.Pieces = ug.encode(m, "abcd", pt.whitespace("abcd"))
+  t.equal_i64("two pieces", pc.count(p), 2)
+  t.equal_str("the first", p.toks[0], "a")
+  t.equal_str("the second", p.toks[1], "bcd")
+}
+
+fn the_pieces_tile_the_word_and_are_in_order() {
+  let v: vb.Vocab = build(["a", "b", "c", "d", "ab", "bcd"])
+  let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -20.0)
+  ug.set_logp(m, "a", -2.0)
+  ug.set_logp(m, "b", -4.0)
+  ug.set_logp(m, "c", -4.0)
+  ug.set_logp(m, "d", -4.0)
+  ug.set_logp(m, "ab", -0.1)
+  ug.set_logp(m, "bcd", -2.0)
+  let p: pc.Pieces = ug.encode(m, "abcd", pt.whitespace("abcd"))
+  t.equal_i64("the first starts at 0", p.nstarts[0], 0)
+  t.equal_i64("the second starts where the first ended", p.nstarts[1], p.nends[0])
+  t.equal_i64("and the last ends at the end", p.nends[1], 4)
+}
+
+fn a_character_with_no_piece_takes_the_unknown_edge() {
+  let v: vb.Vocab = build(["a"])
+  let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -20.0)
+  ug.set_logp(m, "a", -1.0)
+  let p: pc.Pieces = ug.encode(m, "aza", pt.whitespace("aza"))
+  t.equal_i64("three pieces", pc.count(p), 3)
+  t.equal_str("the middle one is unknown", p.toks[1], "[UNK]")
+  t.equal_i64("and it still points at its byte", p.nstarts[1], 1)
+  t.equal_i64("one byte wide", p.nends[1], 2)
+}
+
+fn the_unknown_edge_is_never_longer_than_one_character() {
+  # With a very cheap unknown, a whole-word unknown edge would win if one
+  # existed. It must not: the word must come back as three single-character
+  # unknowns rather than one.
+  let v: vb.Vocab = build([])
+  let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -0.001)
+  let p: pc.Pieces = ug.encode(m, "xyz", pt.whitespace("xyz"))
+  t.equal_i64("three pieces", pc.count(p), 3)
+}
+
+fn a_multibyte_character_is_one_lattice_step() {
+  let v: vb.Vocab = build([])
+  let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -1.0)
+  let s: Str = chr(195) + chr(169) + "a"
+  let p: pc.Pieces = ug.encode(m, s, pt.whitespace(s))
+  t.equal_i64("two pieces and not three", pc.count(p), 2)
+  t.equal_i64("the first covers both of its bytes", p.nends[0], 2)
+}
+
+fn a_piece_is_preferred_over_the_unknown_edge_at_equal_length() {
+  let v: vb.Vocab = build(["a"])
+  let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -1.0)
+  ug.set_logp(m, "a", -0.5)
+  let p: pc.Pieces = ug.encode(m, "a", pt.whitespace("a"))
+  t.equal_str("the real piece won", p.toks[0], "a")
+}
+
+fn a_cheaper_unknown_beats_a_very_unlikely_single_character_piece() {
+  let v: vb.Vocab = build(["a"])
+  let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -1.0)
+  ug.set_logp(m, "a", -50.0)
+  let p: pc.Pieces = ug.encode(m, "a", pt.whitespace("a"))
+  t.equal_str("the unknown edge won", p.toks[0], "[UNK]")
+}
+
+fn fitting_from_counts_gives_relative_frequencies() {
+  let v: vb.Vocab = build(["a", "b"])
+  let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -20.0)
+  let c: vb.Counts = vb.new_counts()
+  vb.observe(c, "a", 3)
+  vb.observe(c, "b", 1)
+  let err: Str = ug.fit(m, c)
+  t.equal_str("it fitted", err, "")
+  t.near("a is log 0.75", ug.logp_of(m, vb.id_of(v, "a")), f64_log(0.75), 0.000000000001)
+  t.near("b is log 0.25", ug.logp_of(m, vb.id_of(v, "b")), f64_log(0.25), 0.000000000001)
+}
+
+fn a_piece_with_no_count_gets_the_unknown_score() {
+  let v: vb.Vocab = build(["a", "unseen"])
+  let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -20.0)
+  let c: vb.Counts = vb.new_counts()
+  vb.observe(c, "a", 2)
+  ug.fit(m, c)
+  t.near("unseen fell back", ug.logp_of(m, vb.id_of(v, "unseen")), -20.0, 0.0)
+}
+
+fn fitting_from_empty_counts_is_refused() {
+  let v: vb.Vocab = build(["a"])
+  let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -20.0)
+  t.check("it returns a message", len(ug.fit(m, vb.new_counts())) > 0)
+}
+
+fn a_positive_log_probability_is_refused() {
+  let v: vb.Vocab = build(["a"])
+  let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -20.0)
+  ug.set_logp(m, "a", 0.5)
+  t.check("validate objects", len(ug.validate(m)) > 0)
+}
+
+fn a_piece_longer_than_the_lattice_window_is_refused() {
+  let v: vb.Vocab = build(["abcdefghijklmnopqrstuvwxyz"])
+  let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -20.0)
+  ug.set_logp(m, "abcdefghijklmnopqrstuvwxyz", -1.0)
+  m.max_piece_bytes = 4
+  t.check("validate objects", len(ug.validate(m)) > 0)
+}
+
+fn setting_a_score_for_a_token_that_is_not_there_is_refused() {
+  let v: vb.Vocab = build(["a"])
+  let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -20.0)
+  t.check("it returns a message", len(ug.set_logp(m, "q", -1.0)) > 0)
+}
+
+fn the_word_score_is_the_sum_of_the_chosen_pieces() {
+  let v: vb.Vocab = build(["a", "b"])
+  let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -20.0)
+  ug.set_logp(m, "a", -1.0)
+  ug.set_logp(m, "b", -2.0)
+  t.near("minus three", ug.score_word(m, "ab"), -3.0, 0.000000000001)
+}
+
+the_viterbi_beats_the_greedy_split()
+the_pieces_tile_the_word_and_are_in_order()
+a_character_with_no_piece_takes_the_unknown_edge()
+the_unknown_edge_is_never_longer_than_one_character()
+a_multibyte_character_is_one_lattice_step()
+a_piece_is_preferred_over_the_unknown_edge_at_equal_length()
+a_cheaper_unknown_beats_a_very_unlikely_single_character_piece()
+fitting_from_counts_gives_relative_frequencies()
+a_piece_with_no_count_gets_the_unknown_score()
+fitting_from_empty_counts_is_refused()
+a_positive_log_probability_is_refused()
+a_piece_longer_than_the_lattice_window_is_refused()
+setting_a_score_for_a_token_that_is_not_there_is_refused()
+the_word_score_is_the_sum_of_the_chosen_pieces()
+t.report("skein unigram")

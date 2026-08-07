@@ -1,0 +1,233 @@
+mode systems
+
+# sequence.tw: n-grams, windows and buckets.
+#
+# The three things that happen to a token sequence after it is a token sequence
+# and before it is a tensor. None of them is difficult and all three have a
+# conventional off-by-one that is easier to write down once than to rediscover.
+#
+# Every function here preserves offsets. A window of a document is still a
+# window of the original bytes, and a window whose tokens point at the window's
+# own indices instead of the source's is the same class of bug `src/encoding.tw`
+# is built to prevent, one level up.
+
+import "../src/encoding.tw" as encoding
+import "../src/normalize.tw" as normalize
+
+# ---- n-grams ----------------------------------------------------------------
+
+# Every contiguous run of `n` tokens, joined by `sep`.
+#
+# `len(toks) - n + 1` runs, and zero when the sequence is shorter than `n`. Not
+# padded to produce a fixed count: padding an n-gram list with boundary markers
+# is a modelling choice (it says the start of a sequence is a token), and a
+# caller who wants it prepends the markers to `toks` before calling.
+fn ngrams(toks: Arr[Str], n: I64, sep: Str) -> Arr[Str] {
+  let out: Arr[Str] = []
+  if n <= 0 {
+    return out
+  }
+  let i: I64 = 0
+  while i + n <= len(toks) {
+    let g: Str = toks[i]
+    let k: I64 = 1
+    while k < n {
+      g = g + sep + toks[i + k]
+      k = k + 1
+    }
+    push(out, g)
+    i = i + 1
+  }
+  out
+}
+
+# The same over ids, returned as the start index of each run.
+#
+# Ids rather than strings, because an n-gram feature over ids is a lookup into a
+# hashed feature space and building the string first only to hash it is two
+# allocations per gram. The caller combines the ids however its feature hashing
+# wants.
+fn ngram_starts(ids: Arr[I64], n: I64) -> Arr[I64] {
+  let out: Arr[I64] = []
+  if n <= 0 {
+    return out
+  }
+  let i: I64 = 0
+  while i + n <= len(ids) {
+    push(out, i)
+    i = i + 1
+  }
+  out
+}
+
+# ---- sliding windows ---------------------------------------------------------
+
+# Split an encoding into windows of `width` tokens with `stride` between window
+# starts.
+#
+# `stride` and not "overlap", because stride is the thing the loop increments
+# and overlap is derived from it: `overlap = width - stride`. Both spellings
+# exist in the wild and they are off by one from each other in half the
+# libraries that have them. `windows_overlapping` below takes the overlap and
+# converts, so a caller can use whichever word they think in and there is one
+# conversion, here.
+#
+# The last window is short rather than padded. Padding it here would hide the
+# short row from `pad_batch_longest`, which is the code that knows what the
+# padding token is, and two places that pad is one too many.
+#
+# WHY OVERLAP AT ALL
+#
+# A document longer than the model's context has to be cut, and a fact that
+# straddles a cut is invisible to every window if the windows do not overlap. An
+# overlap of about a quarter of the width is the usual compromise: it costs 33%
+# more forward passes and makes any span shorter than the overlap appear whole
+# in at least one window.
+fn windows(e: encoding.Encoding, width: I64, stride: I64) -> encoding.Batch {
+  let out: encoding.Batch = encoding.new_batch()
+  if width <= 0 or stride <= 0 {
+    return out
+  }
+  let n: I64 = encoding.length(e)
+  if n == 0 {
+    return out
+  }
+  let at: I64 = 0
+  while at < n {
+    let w: encoding.Encoding = encoding.new_encoding()
+    let i: I64 = at
+    while i < n and i < at + width {
+      encoding.copy_token(w, e, i)
+      i = i + 1
+    }
+    encoding.batch_add(out, w)
+    if at + width >= n {
+      return out
+    }
+    at = at + stride
+  }
+  out
+}
+
+fn windows_overlapping(e: encoding.Encoding, width: I64, overlap: I64) -> encoding.Batch {
+  let stride: I64 = width - overlap
+  if stride < 1 {
+    stride = 1
+  }
+  windows(e, width, stride)
+}
+
+# The source span a window covers, which is what a caller needs to map a
+# window-local answer back to the document. Specials and padding contribute
+# nothing, which `encoding.source_span` already handles.
+fn window_span(w: encoding.Encoding) -> normalize.Span =
+  encoding.source_span(w, 0, encoding.length(w) - 1)
+
+# ---- bucketing ---------------------------------------------------------------
+
+# Group encodings into batches of at most `batch_size` rows, sorting by length
+# first so that rows in a batch have similar lengths.
+#
+# WHY THIS IS WORTH DOING
+#
+# Padding cost is `batch_size * longest - sum_of_lengths`. With lengths drawn
+# from a realistic distribution (most sequences short, a long tail) a random
+# batch of 32 is dominated by its single longest row, and half the arithmetic in
+# a training run is spent on padding. Sorting by length before batching makes
+# the longest row of each batch close to the mean of that batch, and the waste
+# collapses.
+#
+# WHAT IT COSTS, WHICH IS NOT NOTHING
+#
+# Sorted batches are not random batches. Every batch is now homogeneous in
+# length, which correlates with content: a batch of very short sequences is a
+# batch of headlines. Gradient noise becomes structured, and a model trained
+# this way can behave differently from one trained on shuffled batches. The
+# standard mitigation is to sort within a large shuffled pool rather than
+# globally, and `pool` is that: bucketing happens inside consecutive runs of
+# `pool` encodings, so batches are length-homogeneous and their *order* is still
+# governed by whatever shuffled the input. A `pool` of 0 means sort everything,
+# which is right for inference and wrong for training.
+fn bucket(items: Arr[encoding.Encoding], batch_size: I64, pool: I64) -> Arr[encoding.Batch] {
+  let out: Arr[encoding.Batch] = []
+  if batch_size <= 0 {
+    return out
+  }
+  let n: I64 = len(items)
+  let chunk: I64 = if pool > 0 { pool } else { n }
+  if chunk <= 0 {
+    return out
+  }
+  let base: I64 = 0
+  while base < n {
+    let stop: I64 = base + chunk
+    if stop > n {
+      stop = n
+    }
+    let idx: Arr[I64] = []
+    let i: I64 = base
+    while i < stop {
+      push(idx, i)
+      i = i + 1
+    }
+    sort_by_length(idx, items)
+    let k: I64 = 0
+    while k < len(idx) {
+      let b: encoding.Batch = encoding.new_batch()
+      let j: I64 = 0
+      while j < batch_size and k + j < len(idx) {
+        encoding.batch_add(b, items[idx[k + j]])
+        j = j + 1
+      }
+      push(out, b)
+      k = k + batch_size
+    }
+    base = stop
+  }
+  out
+}
+
+# Insertion sort on the index array, by ascending encoding length.
+#
+# Insertion and not merge, unlike `src/vocab.tw`, and the reason is the `pool`
+# argument above: this sorts runs of `pool` items, which is a few hundred at
+# most in every configuration that makes sense, and insertion sort is stable,
+# has no scratch array and is faster than merge sort at that size. Sorting the
+# whole corpus at once (`pool` 0) is the case where this is quadratic, and it is
+# the inference case, where it happens once.
+#
+# Stability matters: two encodings of the same length keep their input order, so
+# whatever shuffled the input still governs.
+fn sort_by_length(idx: Arr[I64], items: Arr[encoding.Encoding]) {
+  let i: I64 = 1
+  while i < len(idx) {
+    let cur: I64 = idx[i]
+    let curlen: I64 = encoding.length(items[cur])
+    let j: I64 = i - 1
+    while j >= 0 and encoding.length(items[idx[j]]) > curlen {
+      idx[j + 1] = idx[j]
+      j = j - 1
+    }
+    idx[j + 1] = cur
+    i = i + 1
+  }
+}
+
+# The padding waste of a bucketing, as a count of padding positions that would
+# be needed. Computed without padding anything, so it can be used to compare two
+# batch sizes before committing to either.
+fn waste_of(batches: Arr[encoding.Batch]) -> I64 {
+  let total: I64 = 0
+  let i: I64 = 0
+  while i < len(batches) {
+    let b: encoding.Batch = batches[i]
+    let w: I64 = encoding.longest(b)
+    let k: I64 = 0
+    while k < encoding.batch_size(b) {
+      total = total + w - encoding.length(b.items[k])
+      k = k + 1
+    }
+    i = i + 1
+  }
+  total
+}

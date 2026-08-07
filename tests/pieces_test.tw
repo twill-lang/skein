@@ -1,0 +1,54 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/pieces.tw" as pc
+
+fn a_new_pieces_is_empty() {
+  t.equal_i64("no pieces", pc.count(pc.new_pieces()), 0)
+}
+
+fn adding_a_piece_keeps_the_three_arrays_in_step() {
+  let p: pc.Pieces = pc.new_pieces()
+  pc.add(p, "ab", 0, 2)
+  pc.add(p, "cd", 2, 4)
+  t.equal_i64("two pieces", pc.count(p), 2)
+  t.equal_i64("two normalised starts", len(p.nstarts), 2)
+  t.equal_i64("two normalised ends", len(p.nends), 2)
+  t.equal_str("the second token", p.toks[1], "cd")
+  t.equal_i64("the second start", p.nstarts[1], 2)
+  t.equal_i64("the second end", p.nends[1], 4)
+}
+
+fn extending_copies_spans_unchanged() {
+  let a: pc.Pieces = pc.new_pieces()
+  let b: pc.Pieces = pc.new_pieces()
+  pc.add(a, "x", 0, 1)
+  pc.add(b, "y", 7, 9)
+  pc.add(b, "z", 9, 10)
+  pc.extend(a, b)
+  t.equal_i64("three pieces after extending", pc.count(a), 3)
+  t.equal_i64("the copied span kept its start", a.nstarts[1], 7)
+  t.equal_i64("and its end", a.nends[1], 9)
+  t.equal_i64("and so did the second copied one", a.nstarts[2], 9)
+}
+
+fn extending_from_an_empty_pieces_changes_nothing() {
+  let a: pc.Pieces = pc.new_pieces()
+  pc.add(a, "x", 0, 1)
+  pc.extend(a, pc.new_pieces())
+  t.equal_i64("still one piece", pc.count(a), 1)
+}
+
+fn debug_join_puts_a_space_between_neighbours_and_not_after_the_last() {
+  let p: pc.Pieces = pc.new_pieces()
+  pc.add(p, "he", 0, 2)
+  pc.add(p, "llo", 2, 5)
+  t.equal_str("joined", pc.debug_join(p), "he llo")
+}
+
+a_new_pieces_is_empty()
+adding_a_piece_keeps_the_three_arrays_in_step()
+extending_copies_spans_unchanged()
+extending_from_an_empty_pieces_changes_nothing()
+debug_join_puts_a_space_between_neighbours_and_not_after_the_last()
+t.report("skein pieces")

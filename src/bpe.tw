@@ -1,0 +1,456 @@
+mode systems
+
+# bpe.tw: byte-level byte-pair encoding.
+#
+# WHY BYTE LEVEL
+#
+# The base alphabet is the 256 byte values, all of them, added to the vocabulary
+# before any merge. The consequence is the whole reason to do it: **nothing is
+# ever out of vocabulary**. Any input, in any script, including bytes that are
+# not valid UTF-8 at all, decomposes into symbols the model has an embedding
+# for. There is no unknown token, no `[UNK]` to tune, and no class of input that
+# silently degrades to a single id.
+#
+# The alternative, a character-level base alphabet, needs a decision about what
+# to do with a character it has never seen, and every answer to that is bad. It
+# also makes the base alphabet a property of the training corpus, so a model
+# trained on English quietly loses information on Greek rather than merely
+# spending more tokens on it. Byte level spends more tokens on unseen scripts,
+# which is a cost you can measure, rather than losing information, which is a
+# cost you cannot.
+#
+# In twill this is easier than in most languages, because `Str` already is
+# bytes: a single-byte token is `text.from_byte(c)` and no byte-to-printable
+# mapping is needed. GPT-2's `bytes_to_unicode` table exists because Python
+# strings are not bytes. skein does not need it and does not have it.
+#
+# WHY THE MERGE ORDER IS THE MODEL
+#
+# Training produces an ordered list of pairs. That list, in order, is the entire
+# learned artefact: the vocabulary is derivable from it (base alphabet plus one
+# token per merge, in order) but the reverse is not true. Two different merge
+# orders can produce the same set of tokens and tokenise the same string
+# differently, so shipping a vocabulary without its merge list ships something
+# that cannot encode.
+#
+# WHY ENCODING APPLIES MERGES BY RANK, NOT LONGEST FIRST
+#
+# This is the part that gets reimplemented wrong. Encoding must replay the
+# merges in the order they were learned: repeatedly find the lowest-ranked pair
+# present anywhere in the word, merge every occurrence of it, and repeat. It
+# must not scan for the longest vocabulary entry that matches at the current
+# position.
+#
+# Greedy longest-match is a different algorithm with different output. Suppose
+# training learned "es" (rank 3), then "est" (rank 40), and separately "te"
+# (rank 7). For "test": by rank, "te" merges first because 7 < 40, giving
+# ["te", "st"] once "st" also merges. Longest-match from the left would take
+# "test" or "tes" if either were present and otherwise take the longest prefix
+# available, reaching a different split. Both splits are made of real
+# vocabulary entries, so nothing errors and nothing looks wrong. The model,
+# however, saw the rank-ordered split during training, and feeding it the other
+# one is feeding it token sequences that never occurred in its training
+# distribution. The accuracy loss is small, uniform and invisible, which is the
+# worst combination.
+#
+# So: rank order, and the rank list is not optional.
+
+import "std/text" as text
+import "../src/vocab.tw" as vocab
+import "../src/pieces.tw" as pieces
+import "../src/pretok.tw" as pretok
+
+# `space_prefix` decides whether a pre-token that followed whitespace is encoded
+# with that space byte attached. True is the GPT-2 behaviour and is the default,
+# because " the" and "the" occur in different places and deserve different ids.
+#
+# It has an offset consequence, stated here because it is the kind of thing that
+# surprises people: with `space_prefix` on, the span of the first piece of a
+# word includes the preceding space byte. That is truthful (the space really is
+# at that offset, and it really is part of that token) rather than convenient.
+# A caller rendering a highlight who wants the space excluded should trim it,
+# and `src/encoding.tw` has `trim_leading_space` for exactly that.
+struct Bpe {
+  left: Arr[Str],
+  right: Arr[Str],
+  rank: Dict[Str, I64],
+  v: vocab.Vocab,
+  space_prefix: Bool,
+}
+
+# The key for a pair in the rank dictionary.
+#
+# Length-prefixed rather than separated by a byte, because there is no byte that
+# cannot appear in a symbol: a byte-level model has all 256 of them as tokens,
+# so a NUL separator or a newline separator both collide. The decimal length of
+# the left symbol followed by a colon is unambiguous, since the length cannot
+# itself contain a colon.
+fn pair_key(a: Str, b: Str) -> Str = str(len(a)) + ":" + a + b
+
+fn new_bpe(space_prefix: Bool) -> Bpe {
+  let l: Arr[Str] = []
+  let r: Arr[Str] = []
+  let d: Dict[Str, I64] = {}
+  Bpe { left: l, right: r, rank: d, v: vocab.new_vocab(), space_prefix: space_prefix }
+}
+
+fn num_merges(m: Bpe) -> I64 = len(m.left)
+
+# The rank of a pair, or -1 when it was never learned. Lower is earlier is
+# stronger.
+fn rank_of(m: Bpe, a: Str, b: Str) -> I64 {
+  let k: Str = pair_key(a, b)
+  if dict_has(m.rank, k) {
+    return m.rank[k]
+  }
+  -1
+}
+
+# ---- the base alphabet ------------------------------------------------------
+
+# All 256 bytes, in byte order, appended to `m.v`.
+#
+# In byte order and not frequency order, so that byte 0x41 is at a fixed id
+# offset from the start of the alphabet in every model skein trains. That makes
+# two models' byte ranges comparable and makes an id in that range readable
+# without the vocabulary file at hand.
+fn add_byte_alphabet(m: Bpe) {
+  let c: I64 = 0
+  while c < 256 {
+    vocab.add(m.v, text.from_byte(c))
+    c = c + 1
+  }
+}
+
+# ---- the word inventory -----------------------------------------------------
+
+# The bytes a pre-token contributes, including the leading space when
+# `space_prefix` is on and the pre-token really was preceded by one in the
+# normalised text.
+#
+# The bounds check on `a > 0` is not paranoia: a document beginning with a
+# space has that space trimmed by `normalize.trim_ends`, so `space_before` can
+# be true for a pre-token at offset 0 in text that was trimmed differently.
+fn word_start(m: Bpe, s: Str, p: pretok.PreTok, i: I64) -> I64 {
+  let a: I64 = p.starts[i]
+  if m.space_prefix and p.space_before[i] and a > 0 and text.is_space(s[a - 1]) {
+    return a - 1
+  }
+  a
+}
+
+# The distinct words of a corpus, with counts.
+#
+# Counting distinct words rather than iterating the corpus is what makes
+# training tractable: a merge pass then costs one scan per distinct word
+# weighted by its count, and natural language has far fewer distinct words than
+# word occurrences. It is also why the counts must be carried through every
+# pass; dropping them turns a corpus into a word list and trains a merge order
+# that reflects vocabulary rather than usage.
+fn corpus_words(m: Bpe, docs: Arr[Str], split_punct: Bool) -> vocab.Counts {
+  let c: vocab.Counts = vocab.new_counts()
+  let d: I64 = 0
+  while d < len(docs) {
+    let s: Str = docs[d]
+    let p: pretok.PreTok = if split_punct { pretok.word_punct(s) } else { pretok.whitespace(s) }
+    let i: I64 = 0
+    while i < pretok.count(p) {
+      vocab.observe(c, text.slice(s, word_start(m, s, p, i), p.ends[i]), 1)
+      i = i + 1
+    }
+    d = d + 1
+  }
+  c
+}
+
+# A word as its byte symbols.
+fn explode(w: Str) -> Arr[Str] {
+  let out: Arr[Str] = []
+  let i: I64 = 0
+  while i < len(w) {
+    push(out, text.from_byte(w[i]))
+    i = i + 1
+  }
+  out
+}
+
+# ---- training ---------------------------------------------------------------
+
+# Count every adjacent pair across every word, weighted by the word's count.
+#
+# The counts are rebuilt from scratch on every merge pass. An incremental
+# version that adjusts only the pairs touched by the merge is the standard
+# optimisation and is roughly an order of magnitude faster on a real corpus; it
+# is not done here because it needs a priority queue keyed by count with
+# decrease-key, and the correctness argument for it is subtle enough that a
+# first version of this library should not be the place it is first written.
+# `docs/needs.md` entry 6 records the cost.
+fn count_pairs(words: Arr[Arr[Str]], counts: Arr[I64], keys: Arr[Str],
+               lefts: Arr[Str], rights: Arr[Str], seen: Dict[Str, I64],
+               totals: Arr[I64]) {
+  let w: I64 = 0
+  while w < len(words) {
+    let syms: Arr[Str] = words[w]
+    let n: I64 = counts[w]
+    let i: I64 = 0
+    while i + 1 < len(syms) {
+      let k: Str = pair_key(syms[i], syms[i + 1])
+      if dict_has(seen, k) {
+        let at: I64 = seen[k]
+        totals[at] = totals[at] + n
+      } else {
+        seen[k] = len(keys)
+        push(keys, k)
+        push(lefts, syms[i])
+        push(rights, syms[i + 1])
+        push(totals, n)
+      }
+      i = i + 1
+    }
+    w = w + 1
+  }
+}
+
+# Replace every occurrence of the adjacent pair (a, b) in `syms` with their
+# concatenation, left to right, without overlapping.
+#
+# Left to right and non-overlapping is what makes "aaa" with the pair (a, a)
+# become ["aa", "a"] and not ["aa", "aa"] or an infinite loop. It matches what
+# the pair counter above sees, which is the invariant the whole training loop
+# rests on: the number of merges applied in this pass equals the count the pair
+# was chosen by.
+fn apply_merge(syms: Arr[Str], a: Str, b: Str) -> Arr[Str] {
+  let out: Arr[Str] = []
+  let i: I64 = 0
+  while i < len(syms) {
+    if i + 1 < len(syms) and text.equal(syms[i], a) and text.equal(syms[i + 1], b) {
+      push(out, syms[i] + syms[i + 1])
+      i = i + 2
+    } else {
+      push(out, syms[i])
+      i = i + 1
+    }
+  }
+  out
+}
+
+# Train `wanted` merges over `docs`.
+#
+# `reserved` are added before the byte alphabet, so special tokens keep the low
+# ids. There is no unknown token and `unk` is not a parameter: see the header.
+#
+# Stops early, and returns fewer merges than asked for, when the best remaining
+# pair occurs fewer than `min_pair_freq` times. A merge learned from a single
+# occurrence encodes one document's typo as a token, spends an embedding row on
+# it and never sees it again. Two is the smallest defensible floor and is the
+# recommended value.
+fn train(docs: Arr[Str], wanted: I64, min_pair_freq: I64, reserved: Arr[Str],
+         space_prefix: Bool, split_punct: Bool) -> Bpe {
+  let m: Bpe = new_bpe(space_prefix)
+  vocab.add_reserved(m.v, reserved, "")
+  add_byte_alphabet(m)
+
+  let wc: vocab.Counts = corpus_words(m, docs, split_punct)
+  let words: Arr[Arr[Str]] = []
+  let counts: Arr[I64] = []
+  let i: I64 = 0
+  while i < len(wc.keys) {
+    push(words, explode(wc.keys[i]))
+    push(counts, vocab.count_of(wc, wc.keys[i]))
+    i = i + 1
+  }
+
+  let done: I64 = 0
+  while done < wanted {
+    let keys: Arr[Str] = []
+    let lefts: Arr[Str] = []
+    let rights: Arr[Str] = []
+    let totals: Arr[I64] = []
+    let seen: Dict[Str, I64] = {}
+    count_pairs(words, counts, keys, lefts, rights, seen, totals)
+    if len(keys) == 0 {
+      return m
+    }
+
+    # Pick the most frequent pair, ties broken by the byte order of the pair
+    # key. The tie-break is required, not tidy: without it the winner is
+    # whichever pair the scan happened to see first, which depends on dict
+    # iteration and on corpus order, and two training runs over the same corpus
+    # would then produce different merge lists and therefore different models.
+    let best: I64 = 0
+    let bi: I64 = 1
+    while bi < len(keys) {
+      if totals[bi] > totals[best] {
+        best = bi
+      } else {
+        if totals[bi] == totals[best] and vocab.str_less(keys[bi], keys[best]) {
+          best = bi
+        }
+      }
+      bi = bi + 1
+    }
+    if totals[best] < min_pair_freq {
+      return m
+    }
+
+    let a: Str = lefts[best]
+    let b: Str = rights[best]
+    push(m.left, a)
+    push(m.right, b)
+    m.rank[pair_key(a, b)] = len(m.left) - 1
+    vocab.add(m.v, a + b)
+
+    let w: I64 = 0
+    while w < len(words) {
+      words[w] = apply_merge(words[w], a, b)
+      w = w + 1
+    }
+    done = done + 1
+  }
+  m
+}
+
+# ---- encoding ---------------------------------------------------------------
+
+# One word's bytes, encoded, as symbols.
+#
+# The loop is the definition of BPE encoding: find the lowest-ranked pair
+# present anywhere in the current symbol list, merge every occurrence of it,
+# repeat until no adjacent pair has a rank. See the header for why this is not
+# longest-match.
+#
+# Complexity is O(merges_applied * len(word)) with the scan rebuilt each time.
+# A word is short, and the practical alternative (a linked list with a priority
+# queue over its pair positions) is the same optimisation deferred in `train`.
+fn encode_symbols(m: Bpe, w: Str) -> Arr[Str] {
+  let syms: Arr[Str] = explode(w)
+  if len(syms) < 2 {
+    return syms
+  }
+  let merging: Bool = true
+  while merging {
+    let best_rank: I64 = -1
+    let bi: I64 = -1
+    let i: I64 = 0
+    while i + 1 < len(syms) {
+      let r: I64 = rank_of(m, syms[i], syms[i + 1])
+      if r >= 0 and (best_rank < 0 or r < best_rank) {
+        best_rank = r
+        bi = i
+      }
+      i = i + 1
+    }
+    if bi < 0 {
+      merging = false
+    } else {
+      syms = apply_merge(syms, syms[bi], syms[bi + 1])
+    }
+  }
+  syms
+}
+
+# Encode the whole normalised string, producing pieces with spans in it.
+#
+# Spans are computed by walking the symbol lengths from the word's start, which
+# is exact because every symbol is a contiguous run of the word's bytes and the
+# merges only ever concatenate neighbours. There is no search and no
+# reconstruction, so there is no way for the span to drift from the token.
+fn encode(m: Bpe, s: Str, p: pretok.PreTok) -> pieces.Pieces {
+  let out: pieces.Pieces = pieces.new_pieces()
+  let i: I64 = 0
+  while i < pretok.count(p) {
+    let a: I64 = word_start(m, s, p, i)
+    let b: I64 = p.ends[i]
+    let syms: Arr[Str] = encode_symbols(m, text.slice(s, a, b))
+    let at: I64 = a
+    let k: I64 = 0
+    while k < len(syms) {
+      pieces.add(out, syms[k], at, at + len(syms[k]))
+      at = at + len(syms[k])
+      k = k + 1
+    }
+    i = i + 1
+  }
+  out
+}
+
+# ---- the merge file ---------------------------------------------------------
+#
+# THE FORMAT
+#
+#   line 1        "skein-merges 1"
+#   line 2        "space_prefix 1" or "space_prefix 0"
+#   lines 3..     "<hex-of-left> <hex-of-right>", one per merge, in rank order
+#
+# Rank is the line number and is not written, for the same reason a vocabulary
+# does not write its ids: a second source of truth about the rank is a
+# corruption that loads.
+#
+# Hex for the same reason as `src/vocab.tw`: a symbol can be any byte sequence,
+# including a space, a newline and byte 0x00, and every escaping scheme has a
+# case it forgot.
+#
+# The vocabulary is saved separately even though it is derivable from this file
+# plus the reserved list. Deriving it is a second implementation of the id
+# assignment, and two implementations of an id assignment is one more than can
+# be kept in agreement.
+
+fn save_merges(m: Bpe) -> Str {
+  let out: Bytes = bytes_new()
+  text.push_str(out, "skein-merges 1\n")
+  text.push_str(out, "space_prefix " + (if m.space_prefix { "1" } else { "0" }) + "\n")
+  let i: I64 = 0
+  while i < len(m.left) {
+    text.push_str(out, vocab.to_hex(m.left[i]))
+    text.push_str(out, " ")
+    text.push_str(out, vocab.to_hex(m.right[i]))
+    text.push_str(out, "\n")
+    i = i + 1
+  }
+  bytes_to_str(out)
+}
+
+fn load_merges(s: Str, out: Bpe) -> Str {
+  let ls: Arr[Str] = text.lines(s)
+  if len(ls) < 2 {
+    return "bpe.load_merges: file has fewer than two header lines"
+  }
+  if not text.equal(ls[0], "skein-merges 1") {
+    return "bpe.load_merges: line 1: expected 'skein-merges 1', got '" + ls[0] + "'"
+  }
+  if not text.starts_with(ls[1], "space_prefix ") {
+    return "bpe.load_merges: line 2: expected 'space_prefix 0' or 'space_prefix 1'"
+  }
+  out.space_prefix = text.equal(text.trim_prefix(ls[1], "space_prefix "), "1")
+  let l: Arr[Str] = []
+  let r: Arr[Str] = []
+  let d: Dict[Str, I64] = {}
+  out.left = l
+  out.right = r
+  out.rank = d
+  let i: I64 = 2
+  while i < len(ls) {
+    if len(ls[i]) > 0 {
+      let sp: I64 = text.find(ls[i], " ")
+      if sp < 0 {
+        return "bpe.load_merges: line " + str(i + 1) + ": no space between the two symbols"
+      }
+      let ha: Str = text.slice(ls[i], 0, sp)
+      let hb: Str = text.slice(ls[i], sp + 1, len(ls[i]))
+      if not vocab.hex_ok(ha) or not vocab.hex_ok(hb) {
+        return "bpe.load_merges: line " + str(i + 1) + ": symbols must be even-length hex"
+      }
+      let a: Str = vocab.from_hex(ha)
+      let b: Str = vocab.from_hex(hb)
+      let k: Str = pair_key(a, b)
+      if dict_has(out.rank, k) {
+        return "bpe.load_merges: line " + str(i + 1) + ": this pair already has a rank"
+      }
+      push(out.left, a)
+      push(out.right, b)
+      out.rank[k] = len(out.left) - 1
+    }
+    i = i + 1
+  }
+  ""
+}

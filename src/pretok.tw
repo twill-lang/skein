@@ -1,0 +1,142 @@
+mode systems
+
+# pretok.tw: splitting normalised text into the units a model is allowed to
+# merge across.
+#
+# WHY PRE-TOKENISATION IS NOT AN IMPLEMENTATION DETAIL
+#
+# Every subword model learns merges inside a pre-token and never across one. If
+# BPE were allowed to merge across a space it would learn ". The" as a single
+# unit, which is a real pattern in text and a useless one in a vocabulary: it
+# spends an id on punctuation-plus-word and it makes the vocabulary depend on
+# sentence structure rather than on morphology. So the pre-tokeniser decides
+# what the model can possibly learn, which makes it a modelling choice with a
+# training cost, and not a preprocessing convenience.
+#
+# It is also where the offsets are born. Every span this file produces is a span
+# in the normalised text, and every downstream span is a sub-span of one of
+# them, so a pre-tokeniser that rounds a boundary loses the offset for every
+# token in that word. The two implementations below therefore never drop a byte
+# from inside a span, only between spans.
+
+import "std/text" as text
+
+# Spans over the normalised text, half-open. `space_before[i]` records whether
+# the pre-token was preceded by whitespace in the normalised text.
+#
+# `space_before` exists because byte-level BPE needs it: GPT-2-style vocabularies
+# distinguish "the" at the start of a line from " the" in the middle, and the
+# distinction is worth an id because the two occur in different places and merge
+# differently. Carrying the flag rather than including the space byte in the
+# span keeps the span pointing only at bytes the user would consider part of the
+# word, which is what an offset is for.
+struct PreTok {
+  starts: Arr[I64],
+  ends: Arr[I64],
+  space_before: Arr[Bool],
+}
+
+fn new_pretok() -> PreTok {
+  let a: Arr[I64] = []
+  let b: Arr[I64] = []
+  let c: Arr[Bool] = []
+  PreTok { starts: a, ends: b, space_before: c }
+}
+
+fn push_span(p: PreTok, a: I64, b: I64, sp: Bool) {
+  push(p.starts, a)
+  push(p.ends, b)
+  push(p.space_before, sp)
+}
+
+fn count(p: PreTok) -> I64 = len(p.starts)
+
+# Runs of non-whitespace, whitespace discarded.
+#
+# The coarsest useful split, and the right one for a byte-level model, which is
+# supposed to learn punctuation attachment itself rather than be told it. It is
+# the wrong one for WordPiece, where a vocabulary entry never spans a comma and
+# handing it "world," produces an unknown token for a word that is in the
+# vocabulary.
+fn whitespace(s: Str) -> PreTok {
+  let p: PreTok = new_pretok()
+  let i: I64 = 0
+  let n: I64 = len(s)
+  let saw_space: Bool = false
+  while i < n {
+    if text.is_space(s[i]) {
+      saw_space = true
+      i = i + 1
+    } else {
+      let a: I64 = i
+      while i < n and not text.is_space(s[i]) {
+        i = i + 1
+      }
+      push_span(p, a, i, saw_space)
+      saw_space = false
+    }
+  }
+  p
+}
+
+# Whitespace split, then every ASCII punctuation byte broken out as its own
+# pre-token.
+#
+# The rule: a byte is punctuation if it is printable ASCII and not alphanumeric.
+# Bytes above 127 are never punctuation here, which is the honest consequence of
+# having no Unicode category table: an ideographic full stop or a typographic
+# quote is treated as part of the word it touches. `docs/needs.md` entry 2 has
+# this, and names this function.
+#
+# The other half of that gap is that this splits inside a multi-byte character
+# never, because the punctuation test only fires on bytes below 128 and no such
+# byte appears inside a UTF-8 sequence. So the limitation is "misses some
+# punctuation", not "corrupts some text", and those are very different bugs.
+fn is_punct(c: I64) -> Bool {
+  if c < 33 or c > 126 {
+    return false
+  }
+  not text.is_alnum(c)
+}
+
+fn word_punct(s: Str) -> PreTok {
+  let p: PreTok = new_pretok()
+  let i: I64 = 0
+  let n: I64 = len(s)
+  let saw_space: Bool = false
+  while i < n {
+    let c: I64 = s[i]
+    if text.is_space(c) {
+      saw_space = true
+      i = i + 1
+    } else {
+      if is_punct(c) {
+        push_span(p, i, i + 1, saw_space)
+        saw_space = false
+        i = i + 1
+      } else {
+        let a: I64 = i
+        while i < n and not text.is_space(s[i]) and not is_punct(s[i]) {
+          i = i + 1
+        }
+        push_span(p, a, i, saw_space)
+        saw_space = false
+      }
+    }
+  }
+  p
+}
+
+# The whole string as one pre-token, if it has any content.
+#
+# For a model that wants to see the document unsplit, which is the character
+# tokeniser and nothing else. It is here rather than inline there so that every
+# model takes the same input type and the driver in `src/encoding.tw` does not
+# grow a special case.
+fn whole(s: Str) -> PreTok {
+  let p: PreTok = new_pretok()
+  if len(s) > 0 {
+    push_span(p, 0, len(s), false)
+  }
+  p
+}

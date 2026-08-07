@@ -1,0 +1,204 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/bpe.tw" as bpe
+import "../src/vocab.tw" as vb
+import "../src/pieces.tw" as pc
+import "../src/pretok.tw" as pt
+
+fn the_base_alphabet_is_every_byte() {
+  let docs: Arr[Str] = ["ab"]
+  let r: Arr[Str] = []
+  let m: bpe.Bpe = bpe.train(docs, 0, 2, r, false, false)
+  t.equal_i64("256 base tokens", vb.size(m.v), 256)
+  t.check("byte zero is in the vocabulary", vb.contains(m.v, chr(0)))
+  t.check("byte 255 is in the vocabulary", vb.contains(m.v, chr(255)))
+  t.equal_i64("byte 65 is at id 65 with no reserved tokens",
+              vb.id_of(m.v, chr(65)), 65)
+}
+
+fn reserved_tokens_push_the_alphabet_up_by_their_count() {
+  let docs: Arr[Str] = ["ab"]
+  let r: Arr[Str] = ["[PAD]", "[CLS]"]
+  let m: bpe.Bpe = bpe.train(docs, 0, 2, r, false, false)
+  t.equal_i64("258 tokens", vb.size(m.v), 258)
+  t.equal_i64("byte 65 moved up by two", vb.id_of(m.v, chr(65)), 67)
+}
+
+fn training_merges_the_most_frequent_pair_first() {
+  # "ab" three times, "cd" once. The pair (a, b) occurs three times and is the
+  # first merge; (c, d) occurs once and is below the floor of two.
+  let docs: Arr[Str] = ["ab ab ab cd"]
+  let r: Arr[Str] = []
+  let m: bpe.Bpe = bpe.train(docs, 10, 2, r, false, false)
+  t.equal_i64("one merge was learned", bpe.num_merges(m), 1)
+  t.equal_str("its left symbol", m.left[0], "a")
+  t.equal_str("its right symbol", m.right[0], "b")
+  t.check("the merged token is in the vocabulary", vb.contains(m.v, "ab"))
+}
+
+fn a_pair_below_the_floor_stops_training_early() {
+  let docs: Arr[Str] = ["xy"]
+  let r: Arr[Str] = []
+  let m: bpe.Bpe = bpe.train(docs, 50, 2, r, false, false)
+  t.equal_i64("nothing was learned from a single occurrence", bpe.num_merges(m), 0)
+}
+
+fn merges_compose_so_a_later_merge_can_use_an_earlier_one() {
+  let docs: Arr[Str] = ["abc abc abc"]
+  let r: Arr[Str] = []
+  let m: bpe.Bpe = bpe.train(docs, 2, 2, r, false, false)
+  t.equal_i64("two merges", bpe.num_merges(m), 2)
+  # (a, b) and (b, c) both occur three times; the tie-break on the pair key
+  # picks (a, b) first, and the second merge is then (ab, c).
+  t.equal_str("the second merge builds on the first", m.left[1], "ab")
+  t.equal_str("and takes the remaining byte", m.right[1], "c")
+  t.check("abc became a token", vb.contains(m.v, "abc"))
+}
+
+fn encoding_applies_merges_by_rank() {
+  let docs: Arr[Str] = ["abc abc abc"]
+  let r: Arr[Str] = []
+  let m: bpe.Bpe = bpe.train(docs, 2, 2, r, false, false)
+  let syms: Arr[Str] = bpe.encode_symbols(m, "abc")
+  t.equal_i64("one symbol", len(syms), 1)
+  t.equal_str("the whole word", syms[0], "abc")
+}
+
+fn an_unseen_string_still_encodes_because_every_byte_is_a_token() {
+  let docs: Arr[Str] = ["abc abc abc"]
+  let r: Arr[Str] = []
+  let m: bpe.Bpe = bpe.train(docs, 2, 2, r, false, false)
+  let syms: Arr[Str] = bpe.encode_symbols(m, "qz")
+  t.equal_i64("two symbols", len(syms), 2)
+  t.equal_str("the first byte", syms[0], "q")
+  t.equal_str("the second byte", syms[1], "z")
+  t.check("and both are in the vocabulary", vb.contains(m.v, "q"))
+}
+
+fn a_multibyte_character_survives_as_its_bytes() {
+  let docs: Arr[Str] = ["x"]
+  let r: Arr[Str] = []
+  let m: bpe.Bpe = bpe.train(docs, 0, 2, r, false, false)
+  let syms: Arr[Str] = bpe.encode_symbols(m, chr(195) + chr(169))
+  t.equal_i64("two byte symbols", len(syms), 2)
+  t.check("the lead byte is a token", vb.contains(m.v, chr(195)))
+  t.check("the continuation byte is a token", vb.contains(m.v, chr(169)))
+}
+
+fn applying_a_merge_does_not_overlap_with_itself() {
+  let syms: Arr[Str] = ["a", "a", "a"]
+  let out: Arr[Str] = bpe.apply_merge(syms, "a", "a")
+  t.equal_i64("three a's give two symbols", len(out), 2)
+  t.equal_str("the first is merged", out[0], "aa")
+  t.equal_str("the third is left alone", out[1], "a")
+}
+
+fn the_spans_of_the_pieces_tile_the_word_exactly() {
+  let docs: Arr[Str] = ["abc abc abc"]
+  let r: Arr[Str] = []
+  let m: bpe.Bpe = bpe.train(docs, 1, 2, r, false, false)
+  let s: Str = "abc abc"
+  let p: pc.Pieces = bpe.encode(m, s, pt.whitespace(s))
+  let i: I64 = 0
+  let covered: I64 = 0
+  while i < pc.count(p) {
+    t.equal_i64("the token length equals its span",
+                len(p.toks[i]), p.nends[i] - p.nstarts[i])
+    covered = covered + p.nends[i] - p.nstarts[i]
+    i = i + 1
+  }
+  t.equal_i64("the pieces cover both words and not the space", covered, 6)
+}
+
+fn the_space_prefix_puts_the_leading_space_in_the_span() {
+  let docs: Arr[Str] = ["the the the"]
+  let r: Arr[Str] = []
+  let m: bpe.Bpe = bpe.train(docs, 0, 2, r, true, false)
+  let s: Str = "the the"
+  let p: pc.Pieces = bpe.encode(m, s, pt.whitespace(s))
+  t.equal_i64("the first word starts at 0", p.nstarts[0], 0)
+  # The second word is at byte 4 and its leading space is byte 3.
+  let i: I64 = 0
+  let second: I64 = -1
+  while i < pc.count(p) {
+    if p.nstarts[i] == 3 {
+      second = i
+    }
+    i = i + 1
+  }
+  t.check("a piece begins at the space before the second word", second >= 0)
+}
+
+fn without_the_space_prefix_no_span_includes_a_space() {
+  let docs: Arr[Str] = ["the the the"]
+  let r: Arr[Str] = []
+  let m: bpe.Bpe = bpe.train(docs, 0, 2, r, false, false)
+  let s: Str = "the the"
+  let p: pc.Pieces = bpe.encode(m, s, pt.whitespace(s))
+  let i: I64 = 0
+  let touches_space: Bool = false
+  while i < pc.count(p) {
+    if p.nstarts[i] == 3 {
+      touches_space = true
+    }
+    i = i + 1
+  }
+  t.check("no piece starts at the space", not touches_space)
+}
+
+fn the_pair_key_cannot_be_confused_by_a_symbol_containing_a_separator() {
+  # "a:b" plus "c" and "a" plus ":bc" would collide under a colon separator
+  # with no length prefix. They must not collide here.
+  t.check("the two keys differ",
+          not (bpe.pair_key("a:b", "c") == bpe.pair_key("a", ":bc")))
+}
+
+fn the_merge_file_round_trips() {
+  let docs: Arr[Str] = ["ab ab ab cd cd"]
+  let r: Arr[Str] = []
+  let m: bpe.Bpe = bpe.train(docs, 5, 2, r, true, false)
+  let blob: Str = bpe.save_merges(m)
+  let w: bpe.Bpe = bpe.new_bpe(false)
+  let err: Str = bpe.load_merges(blob, w)
+  t.equal_str("it loaded", err, "")
+  t.equal_i64("the same number of merges", bpe.num_merges(w), bpe.num_merges(m))
+  t.check("the space prefix flag came back", w.space_prefix)
+  t.equal_str("and saving again gives the same bytes", bpe.save_merges(w), blob)
+  t.equal_i64("the first merge kept its rank", bpe.rank_of(w, m.left[0], m.right[0]), 0)
+}
+
+fn a_corrupt_merge_file_is_refused() {
+  let w: bpe.Bpe = bpe.new_bpe(false)
+  t.check("a bad magic line", len(bpe.load_merges("nope\nspace_prefix 0\n", w)) > 0)
+  t.check("a missing flag line", len(bpe.load_merges("skein-merges 1\nx\n", w)) > 0)
+  t.check("a line with one symbol",
+          len(bpe.load_merges("skein-merges 1\nspace_prefix 0\n4142\n", w)) > 0)
+  t.check("a duplicate pair",
+          len(bpe.load_merges("skein-merges 1\nspace_prefix 0\n41 42\n41 42\n", w)) > 0)
+}
+
+fn punctuation_splitting_stops_a_merge_across_a_comma() {
+  let docs: Arr[Str] = ["a, a, a,"]
+  let r: Arr[Str] = []
+  let m: bpe.Bpe = bpe.train(docs, 5, 2, r, false, true)
+  t.check("the pair a-comma was never learned", bpe.rank_of(m, "a", ",") < 0)
+}
+
+the_base_alphabet_is_every_byte()
+reserved_tokens_push_the_alphabet_up_by_their_count()
+training_merges_the_most_frequent_pair_first()
+a_pair_below_the_floor_stops_training_early()
+merges_compose_so_a_later_merge_can_use_an_earlier_one()
+encoding_applies_merges_by_rank()
+an_unseen_string_still_encodes_because_every_byte_is_a_token()
+a_multibyte_character_survives_as_its_bytes()
+applying_a_merge_does_not_overlap_with_itself()
+the_spans_of_the_pieces_tile_the_word_exactly()
+the_space_prefix_puts_the_leading_space_in_the_span()
+without_the_space_prefix_no_span_includes_a_space()
+the_pair_key_cannot_be_confused_by_a_symbol_containing_a_separator()
+the_merge_file_round_trips()
+a_corrupt_merge_file_is_refused()
+punctuation_splitting_stops_a_merge_across_a_comma()
+t.report("skein bpe")

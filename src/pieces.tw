@@ -1,0 +1,73 @@
+mode systems
+
+# pieces.tw: the one thing every tokenising model returns.
+#
+# WHY THIS TYPE EXISTS SEPARATELY
+#
+# skein has five models (byte-level BPE, WordPiece, Unigram, whitespace,
+# character) and one offset-mapping implementation. That ratio is the design.
+# If each model built its own `Encoding`, each would map its spans back through
+# the normalisation trace itself, and five copies of that mapping is five
+# chances to get it wrong in a way that only shows on non-ASCII input.
+#
+# So a model does exactly one thing: given the normalised text and a set of
+# pre-token spans, produce `Pieces`, which is the token strings and their byte
+# spans **in the normalised text**. Nothing else. `src/encoding.tw` then does
+# the single mapping back to the source, adds special tokens, truncates and
+# pads. A model never sees the original string and never computes a source
+# offset, so a model cannot get a source offset wrong.
+#
+# The spans here are normalised-text spans and the field names say so. That
+# naming is not decoration: `src/encoding.tw` is the only file allowed to hold
+# an array called `starts` that means source offsets, and everywhere else the
+# name is `nstarts`. Reviewing an offset bug then reduces to checking that no
+# `nstart` reached a field called `start`.
+
+struct Pieces {
+  toks: Arr[Str],
+  nstarts: Arr[I64],
+  nends: Arr[I64],
+}
+
+fn new_pieces() -> Pieces {
+  let t: Arr[Str] = []
+  let a: Arr[I64] = []
+  let b: Arr[I64] = []
+  Pieces { toks: t, nstarts: a, nends: b }
+}
+
+fn add(p: Pieces, tok: Str, a: I64, b: I64) {
+  push(p.toks, tok)
+  push(p.nstarts, a)
+  push(p.nends, b)
+}
+
+fn count(p: Pieces) -> I64 = len(p.toks)
+
+# Append `src` onto `dst`, unchanged. Models build one `Pieces` per pre-token
+# and the driver concatenates, rather than threading one buffer through, because
+# a model that appends to a shared buffer can leave it half-written when it
+# takes its unknown-token fallback path.
+fn extend(dst: Pieces, src: Pieces) {
+  let i: I64 = 0
+  while i < len(src.toks) {
+    add(dst, src.toks[i], src.nstarts[i], src.nends[i])
+    i = i + 1
+  }
+}
+
+# The tokens joined by a space. For test assertions and for printing, not for
+# reconstruction: a tokeniser's output is not required to rejoin into its input
+# and for WordPiece and BPE it does not.
+fn debug_join(p: Pieces) -> Str {
+  let out: Str = ""
+  let i: I64 = 0
+  while i < len(p.toks) {
+    if i > 0 {
+      out = out + " "
+    }
+    out = out + p.toks[i]
+    i = i + 1
+  }
+  out
+}

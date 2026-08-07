@@ -1,0 +1,152 @@
+mode systems
+
+# embed.tw: the handoff to `std/nn`, and nothing more.
+#
+# THIS FILE DELIBERATELY DOES NOT CONTAIN AN EMBEDDING TABLE
+#
+# `std/nn` already has one: `embedding_params(vocab, dim)` allocates the matrix
+# and `embedding(p, ids)` gathers rows from it. skein does not reimplement
+# either, and this is a decision rather than an omission.
+#
+# An embedding table is a parameter tensor that has to be initialised the way
+# the rest of the model is initialised, saved in the same checkpoint, updated by
+# the same optimiser, and differentiated by the same `grad`. A copy living in a
+# tokenisation library would be a second parameter tensor outside the model's
+# tree, and everything that walks the tree (`map_leaves`, the optimiser, the
+# checkpoint) would silently miss it. The symptom is an embedding that never
+# trains, which looks exactly like a model that has not converged yet.
+#
+# So skein's job stops at ids, and this file is the seam: it turns an
+# `Encoding` into the shape `std/nn`'s `embedding` wants, checks the two things
+# that go wrong at that boundary, and calls it.
+#
+# THE TWO THINGS THAT GO WRONG AT THE BOUNDARY
+#
+#   1. An id of -1. `id_or_unk` returns the vocabulary's unknown id, and a
+#      vocabulary with no unknown token returns -1. That reaches `gather` as a
+#      negative row index. Refused here with a message that says which position.
+#   2. An id at or above the table's row count. That happens whenever the
+#      vocabulary was rebuilt and the checkpoint was not, which is a routine
+#      mistake and produces either a crash or, worse, a wrapped index that
+#      returns another word's embedding.
+#
+# Both checks are linear in the sequence length and are worth it: they turn two
+# silent failures into two messages.
+
+import "../src/encoding.tw" as encoding
+import "std/nn" as nn
+
+# Every id is a usable row index into a table of `vocab_size` rows.
+fn check_ids(ids: Arr[I64], vocab_size: I64) -> Str {
+  let i: I64 = 0
+  while i < len(ids) {
+    if ids[i] < 0 {
+      return "embed: position " + str(i) +
+             " has id -1, which means the token was unknown and the vocabulary has no unknown token"
+    }
+    if ids[i] >= vocab_size {
+      return "embed: position " + str(i) + " has id " + str(ids[i]) +
+             ", but the embedding table has only " + str(vocab_size) +
+             " rows; the vocabulary and the checkpoint do not match"
+    }
+    i = i + 1
+  }
+  ""
+}
+
+# The ids of one encoding, as an `Arr[I64]`.
+#
+# A copy rather than the encoding's own array, because `nn.embedding` receives
+# it and `Arr` has reference semantics: handing over the encoding's array means
+# anything that later mutates it mutates what was fed to the model. Padding a
+# batch after embedding it is exactly that mistake.
+fn ids_of(e: encoding.Encoding) -> Arr[I64] {
+  let out: Arr[I64] = []
+  let i: I64 = 0
+  while i < encoding.length(e) {
+    push(out, e.ids[i])
+    i = i + 1
+  }
+  out
+}
+
+# Every row of a batch, flattened, with the row length returned separately.
+#
+# Flat rather than nested, because `nn.embedding` gathers rows and a nested list
+# would have to be flattened somewhere anyway. The batch must be padded first:
+# a ragged batch has no rectangular shape and reshaping the result would be
+# wrong in a way that produces a valid tensor.
+fn batch_ids(b: encoding.Batch, out: Arr[I64]) -> Str {
+  if encoding.batch_size(b) == 0 {
+    return "embed.batch_ids: the batch is empty"
+  }
+  let width: I64 = encoding.length(b.items[0])
+  let i: I64 = 0
+  while i < encoding.batch_size(b) {
+    if encoding.length(b.items[i]) != width {
+      return "embed.batch_ids: row " + str(i) + " has length " +
+             str(encoding.length(b.items[i])) + " but row 0 has length " + str(width) +
+             "; pad the batch before embedding it"
+    }
+    let k: I64 = 0
+    while k < width {
+      push(out, b.items[i].ids[k])
+      k = k + 1
+    }
+    i = i + 1
+  }
+  ""
+}
+
+# The attention mask of a padded batch, flattened the same way as `batch_ids`.
+#
+# Returned separately rather than folded into the ids, because the model needs
+# both and they are used at different places: the ids go into the embedding, the
+# mask goes into the attention. A caller that forgets the mask gets a model that
+# attends to padding, and the only defence against that is the mask being an
+# obvious separate thing it has to pass.
+fn batch_mask(b: encoding.Batch, out: Arr[I64]) -> Str {
+  if encoding.batch_size(b) == 0 {
+    return "embed.batch_mask: the batch is empty"
+  }
+  let width: I64 = encoding.length(b.items[0])
+  let i: I64 = 0
+  while i < encoding.batch_size(b) {
+    if encoding.length(b.items[i]) != width {
+      return "embed.batch_mask: row " + str(i) + " is not the same length as row 0"
+    }
+    let k: I64 = 0
+    while k < width {
+      push(out, b.items[i].mask[k])
+      k = k + 1
+    }
+    i = i + 1
+  }
+  ""
+}
+
+# Allocate the table. A thin wrapper that exists so the vocabulary size comes
+# from the vocabulary rather than from a number typed twice.
+#
+# `vocab_size` must be `vocab.size(v)` exactly, not rounded up to a power of
+# two. Rounding up is a real optimisation on some hardware and it makes the
+# rows above the vocabulary unreachable, which means they receive no gradient
+# and are dead weight in every checkpoint from then on. If it is wanted it
+# belongs in the model, visibly, not here.
+fn table(vocab_size: I64, dim: I64) = nn.embedding_params(vocab_size, dim)
+
+# Embed one encoding.
+#
+# The result is `std/nn`'s, unchanged: skein does not wrap it, does not name it
+# and does not own it.
+#
+# The check is a separate call rather than folded in here, because this function
+# has to return a tensor and the house error convention returns a `Str`, and a
+# function cannot do both (`docs/needs.md` entry 8). So the contract is: call
+# `check_encoding` once per encoding, then call this. `examples/pipeline.tw`
+# shows the pair.
+fn embed(p, e: encoding.Encoding) = nn.embedding(p, ids_of(e))
+
+# The check `embed` cannot make for itself.
+fn check_encoding(e: encoding.Encoding, vocab_size: I64) -> Str =
+  check_ids(ids_of(e), vocab_size)

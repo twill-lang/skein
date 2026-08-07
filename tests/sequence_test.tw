@@ -1,0 +1,150 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/sequence.tw" as sq
+import "../src/encoding.tw" as enc
+import "../src/normalize.tw" as nm
+
+# A sequence of `n` single-token positions, each pointing at source byte i.
+fn run_of(n: I64) -> enc.Encoding {
+  let e: enc.Encoding = enc.new_encoding()
+  let i: I64 = 0
+  while i < n {
+    enc.push_token(e, 100 + i, "t" + str(i), 1, 0, i, i + 1, false)
+    i = i + 1
+  }
+  e
+}
+
+fn ngrams_produce_one_fewer_than_you_expect_at_each_step() {
+  let toks: Arr[Str] = ["a", "b", "c", "d"]
+  t.equal_i64("four unigrams", len(sq.ngrams(toks, 1, " ")), 4)
+  t.equal_i64("three bigrams", len(sq.ngrams(toks, 2, " ")), 3)
+  t.equal_i64("two trigrams", len(sq.ngrams(toks, 3, " ")), 2)
+  t.equal_i64("one four-gram", len(sq.ngrams(toks, 4, " ")), 1)
+  t.equal_i64("no five-grams", len(sq.ngrams(toks, 5, " ")), 0)
+}
+
+fn an_ngram_is_joined_by_the_separator() {
+  let toks: Arr[Str] = ["a", "b", "c"]
+  let g: Arr[Str] = sq.ngrams(toks, 2, "_")
+  t.equal_str("the first bigram", g[0], "a_b")
+  t.equal_str("the second", g[1], "b_c")
+}
+
+fn an_ngram_order_of_zero_gives_nothing_rather_than_looping() {
+  let toks: Arr[Str] = ["a"]
+  t.equal_i64("nothing", len(sq.ngrams(toks, 0, " ")), 0)
+  let ids: Arr[I64] = [1]
+  t.equal_i64("nothing from ids either", len(sq.ngram_starts(ids, 0)), 0)
+}
+
+fn ngram_starts_are_the_positions_the_runs_begin_at() {
+  let ids: Arr[I64] = [7, 8, 9, 10]
+  let s: Arr[I64] = sq.ngram_starts(ids, 3)
+  t.equal_i64("two runs", len(s), 2)
+  t.equal_i64("the first at 0", s[0], 0)
+  t.equal_i64("the second at 1", s[1], 1)
+}
+
+fn windows_advance_by_the_stride_and_not_by_the_width() {
+  let e: enc.Encoding = run_of(10)
+  let b: enc.Batch = sq.windows(e, 4, 2)
+  # Starts at 0, 2, 4, 6 and the one at 6 reaches the end.
+  t.equal_i64("four windows", enc.batch_size(b), 4)
+  t.equal_i64("each is four long", enc.length(b.items[0]), 4)
+  t.equal_i64("the last is four long too", enc.length(b.items[3]), 4)
+}
+
+fn the_last_window_is_short_rather_than_padded() {
+  let e: enc.Encoding = run_of(5)
+  let b: enc.Batch = sq.windows(e, 4, 4)
+  t.equal_i64("two windows", enc.batch_size(b), 2)
+  t.equal_i64("the second holds the one remaining token", enc.length(b.items[1]), 1)
+  t.equal_i64("and it is not masked out", b.items[1].mask[0], 1)
+}
+
+fn a_window_keeps_the_source_offsets_of_its_tokens() {
+  let e: enc.Encoding = run_of(10)
+  let b: enc.Batch = sq.windows(e, 4, 3)
+  let w: enc.Encoding = b.items[1]
+  t.equal_i64("the second window starts at source byte 3", w.starts[0], 3)
+  let s: nm.Span = sq.window_span(w)
+  t.equal_i64("its span starts at 3", s.start, 3)
+  t.equal_i64("and ends at 7", s.end, 7)
+}
+
+fn overlap_and_stride_are_the_same_thing_stated_two_ways() {
+  let e: enc.Encoding = run_of(10)
+  let a: enc.Batch = sq.windows(e, 4, 3)
+  let b: enc.Batch = sq.windows_overlapping(e, 4, 1)
+  t.equal_i64("the same number of windows", enc.batch_size(a), enc.batch_size(b))
+  t.equal_i64("and the same second start", a.items[1].starts[0], b.items[1].starts[0])
+}
+
+fn an_overlap_at_least_as_wide_as_the_window_still_makes_progress() {
+  let e: enc.Encoding = run_of(4)
+  let b: enc.Batch = sq.windows_overlapping(e, 2, 5)
+  t.equal_i64("three windows at stride one", enc.batch_size(b), 3)
+}
+
+fn a_window_of_an_empty_encoding_is_no_windows() {
+  t.equal_i64("nothing", enc.batch_size(sq.windows(enc.new_encoding(), 4, 2)), 0)
+}
+
+fn bucketing_groups_similar_lengths_together() {
+  let items: Arr[enc.Encoding] = [run_of(1), run_of(9), run_of(2), run_of(8)]
+  let bs: Arr[enc.Batch] = sq.bucket(items, 2, 0)
+  t.equal_i64("two batches of two", len(bs), 2)
+  t.equal_i64("the first batch holds the two short rows", enc.longest(bs[0]), 2)
+  t.equal_i64("the second holds the two long ones", enc.longest(bs[1]), 9)
+}
+
+fn bucketing_collapses_the_padding_waste() {
+  # Lengths 1, 9, 2, 8 in that order, batched two at a time. Pairing them as
+  # given costs (9-1) + (8-2) = 14 wasted positions. Sorted, the pairs are
+  # (1, 2) and (8, 9) and the cost is 1 + 1.
+  let items: Arr[enc.Encoding] = [run_of(1), run_of(9), run_of(2), run_of(8)]
+  let sorted: Arr[enc.Batch] = sq.bucket(items, 2, 0)
+  t.equal_i64("two wasted positions instead of fourteen", sq.waste_of(sorted), 2)
+}
+
+fn a_pool_confines_the_sort_to_a_window_of_the_input() {
+  # With a pool of two, the first two and the last two are sorted separately, so
+  # the long row at index 1 stays in the first batch.
+  let items: Arr[enc.Encoding] = [run_of(1), run_of(9), run_of(2), run_of(8)]
+  let bs: Arr[enc.Batch] = sq.bucket(items, 2, 2)
+  t.equal_i64("two batches", len(bs), 2)
+  t.equal_i64("the first still holds the nine", enc.longest(bs[0]), 9)
+}
+
+fn sorting_by_length_is_stable() {
+  let items: Arr[enc.Encoding] = [run_of(3), run_of(3), run_of(1)]
+  let idx: Arr[I64] = [0, 1, 2]
+  sq.sort_by_length(idx, items)
+  t.equal_i64("the short one came first", idx[0], 2)
+  t.equal_i64("then the first of the equal pair", idx[1], 0)
+  t.equal_i64("then the second", idx[2], 1)
+}
+
+fn a_batch_size_of_zero_gives_nothing_rather_than_looping() {
+  let items: Arr[enc.Encoding] = [run_of(1)]
+  t.equal_i64("nothing", len(sq.bucket(items, 0, 0)), 0)
+}
+
+ngrams_produce_one_fewer_than_you_expect_at_each_step()
+an_ngram_is_joined_by_the_separator()
+an_ngram_order_of_zero_gives_nothing_rather_than_looping()
+ngram_starts_are_the_positions_the_runs_begin_at()
+windows_advance_by_the_stride_and_not_by_the_width()
+the_last_window_is_short_rather_than_padded()
+a_window_keeps_the_source_offsets_of_its_tokens()
+overlap_and_stride_are_the_same_thing_stated_two_ways()
+an_overlap_at_least_as_wide_as_the_window_still_makes_progress()
+a_window_of_an_empty_encoding_is_no_windows()
+bucketing_groups_similar_lengths_together()
+bucketing_collapses_the_padding_waste()
+a_pool_confines_the_sort_to_a_window_of_the_input()
+sorting_by_length_is_stable()
+a_batch_size_of_zero_gives_nothing_rather_than_looping()
+t.report("skein sequence")

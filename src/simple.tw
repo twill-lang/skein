@@ -1,0 +1,102 @@
+mode systems
+
+# simple.tw: the two tokenisers that always work.
+#
+# WHY A LIBRARY WITH THREE SUBWORD MODELS ALSO SHIPS THESE
+#
+# Because a caller always needs something that runs. A subword model needs a
+# trained artefact: BPE needs a merge list, WordPiece and Unigram need a
+# vocabulary, and all three need the artefact to match the checkpoint. Before
+# any of that exists, and whenever it is being debugged, there has to be a
+# tokeniser that takes a string and a vocabulary and produces pieces with
+# correct offsets, with no training step and no configuration.
+#
+# These two are that. They are also the reference implementations for the offset
+# contract: they are short enough to be obviously correct, so a spans test that
+# passes here and fails on BPE is a BPE bug, and a test that fails on both is a
+# test bug. `tests/simple_test.tw` is deliberately the strictest offset test in
+# the repository for that reason.
+#
+# Neither is a good tokeniser. Whitespace gives a vocabulary the size of the
+# corpus and an unknown rate that never converges; character gives sequences ten
+# times longer than they need to be. That is fine. They are not for training a
+# model, they are for making the rest of the pipeline runnable.
+
+import "std/text" as text
+import "../src/vocab.tw" as vocab
+import "../src/pieces.tw" as pieces
+import "../src/pretok.tw" as pretok
+
+# Every pre-token is one piece.
+#
+# The spans are exactly the pre-token spans, so this is the identity on the
+# pre-tokeniser and its offsets are correct by inspection.
+fn whitespace(s: Str, p: pretok.PreTok) -> pieces.Pieces {
+  let out: pieces.Pieces = pieces.new_pieces()
+  let i: I64 = 0
+  while i < pretok.count(p) {
+    pieces.add(out, text.slice(s, p.starts[i], p.ends[i]), p.starts[i], p.ends[i])
+    i = i + 1
+  }
+  out
+}
+
+# Every character is one piece.
+#
+# Characters and not bytes, which is the only interesting decision in this file.
+# A byte-level split would be simpler and would produce pieces that are half a
+# character, which are not valid UTF-8, do not print, and cannot be looked up in
+# any vocabulary a human wrote. `src/bpe.tw` is allowed to work in bytes because
+# it reassembles them; a tokeniser whose output is final is not.
+#
+# The consequence is that this can emit a piece that is not in any vocabulary,
+# for a character nobody has seen. That is what the unknown token is for, and
+# `ids` below applies it.
+fn characters(s: Str, p: pretok.PreTok) -> pieces.Pieces {
+  let out: pieces.Pieces = pieces.new_pieces()
+  let i: I64 = 0
+  while i < pretok.count(p) {
+    let a: I64 = p.starts[i]
+    let b: I64 = p.ends[i]
+    let at: I64 = a
+    while at < b {
+      let w: I64 = text.char_size(s[at])
+      if at + w > b {
+        w = 1
+      }
+      pieces.add(out, text.slice(s, at, at + w), at, at + w)
+      at = at + w
+    }
+    i = i + 1
+  }
+  out
+}
+
+# Ids for any `Pieces` against any vocabulary.
+#
+# Shared by both tokenisers here and usable with the subword models' output too,
+# which is why it takes a `Vocab` rather than a model. A token absent from the
+# vocabulary becomes `v.unk_id`, and when the vocabulary has no unknown token
+# that is -1, which `src/embed.tw` refuses rather than passing to `gather`.
+fn ids(v: vocab.Vocab, p: pieces.Pieces) -> Arr[I64] {
+  let out: Arr[I64] = []
+  let i: I64 = 0
+  while i < len(p.toks) {
+    push(out, vocab.id_or_unk(v, p.toks[i]))
+    i = i + 1
+  }
+  out
+}
+
+# Count every piece a tokeniser produced over a corpus, ready for
+# `vocab.build`.
+#
+# Here rather than in `src/vocab.tw` because it is about pieces, and
+# `src/vocab.tw` deliberately knows nothing about tokenisation.
+fn count_pieces(c: vocab.Counts, p: pieces.Pieces) {
+  let i: I64 = 0
+  while i < len(p.toks) {
+    vocab.observe(c, p.toks[i], 1)
+    i = i + 1
+  }
+}

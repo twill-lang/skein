@@ -1,0 +1,109 @@
+mode systems
+
+# These tests cover the checks and the flattening. They do not call
+# `nn.embedding`, because asserting anything about a tensor here would be
+# testing `std/nn` rather than skein, and because the seam this file exists to
+# guard is entirely on skein's side of the call.
+
+import "harness.tw" as t
+import "../src/embed.tw" as em
+import "../src/encoding.tw" as enc
+
+fn row(ids: Arr[I64]) -> enc.Encoding {
+  let e: enc.Encoding = enc.new_encoding()
+  let i: I64 = 0
+  while i < len(ids) {
+    enc.push_token(e, ids[i], "t", 1, 0, i, i + 1, false)
+    i = i + 1
+  }
+  e
+}
+
+fn ids_within_the_table_pass() {
+  let ids: Arr[I64] = [0, 1, 2]
+  t.equal_str("no message", em.check_ids(ids, 3), "")
+}
+
+fn an_id_of_minus_one_is_refused_and_the_position_is_named() {
+  let ids: Arr[I64] = [0, -1, 2]
+  let err: Str = em.check_ids(ids, 3)
+  t.check("it is refused", len(err) > 0)
+  t.check("and it says which position", len(err) > 20)
+}
+
+fn an_id_past_the_end_of_the_table_is_refused() {
+  let ids: Arr[I64] = [0, 3]
+  t.check("refused", len(em.check_ids(ids, 3)) > 0)
+}
+
+fn the_last_valid_id_is_one_below_the_row_count() {
+  let ok: Arr[I64] = [2]
+  let bad: Arr[I64] = [3]
+  t.equal_str("id 2 into three rows is fine", em.check_ids(ok, 3), "")
+  t.check("id 3 into three rows is not", len(em.check_ids(bad, 3)) > 0)
+}
+
+fn the_ids_handed_to_the_model_are_a_copy() {
+  let e: enc.Encoding = row([5, 6])
+  let ids: Arr[I64] = em.ids_of(e)
+  ids[0] = 99
+  t.equal_i64("the encoding was not disturbed", e.ids[0], 5)
+}
+
+fn checking_an_encoding_is_checking_its_ids() {
+  let e: enc.Encoding = row([0, 9])
+  t.check("an id past the table is caught", len(em.check_encoding(e, 4)) > 0)
+  t.equal_str("and a valid one is not", em.check_encoding(row([0, 1]), 4), "")
+}
+
+fn a_padded_batch_flattens_row_by_row() {
+  let b: enc.Batch = enc.new_batch()
+  enc.batch_add(b, row([1, 2]))
+  enc.batch_add(b, row([3, 4]))
+  let flat: Arr[I64] = []
+  t.equal_str("it flattened", em.batch_ids(b, flat), "")
+  t.equal_i64("four ids", len(flat), 4)
+  t.equal_i64("row major, first row first", flat[0], 1)
+  t.equal_i64("then the rest of row zero", flat[1], 2)
+  t.equal_i64("then row one", flat[2], 3)
+}
+
+fn a_ragged_batch_is_refused_rather_than_reshaped() {
+  let b: enc.Batch = enc.new_batch()
+  enc.batch_add(b, row([1, 2]))
+  enc.batch_add(b, row([3]))
+  let flat: Arr[I64] = []
+  t.check("it names the offending row", len(em.batch_ids(b, flat)) > 0)
+}
+
+fn an_empty_batch_is_refused() {
+  let flat: Arr[I64] = []
+  t.check("ids", len(em.batch_ids(enc.new_batch(), flat)) > 0)
+  let m: Arr[I64] = []
+  t.check("mask", len(em.batch_mask(enc.new_batch(), m)) > 0)
+}
+
+fn the_mask_flattens_the_same_way_as_the_ids() {
+  let b: enc.Batch = enc.new_batch()
+  let one: enc.Encoding = row([1, 2])
+  one.mask[1] = 0
+  enc.batch_add(b, one)
+  enc.batch_add(b, row([3, 4]))
+  let m: Arr[I64] = []
+  t.equal_str("it flattened", em.batch_mask(b, m), "")
+  t.equal_i64("four entries", len(m), 4)
+  t.equal_i64("the masked-out position", m[1], 0)
+  t.equal_i64("and the rest are in", m[2], 1)
+}
+
+ids_within_the_table_pass()
+an_id_of_minus_one_is_refused_and_the_position_is_named()
+an_id_past_the_end_of_the_table_is_refused()
+the_last_valid_id_is_one_below_the_row_count()
+the_ids_handed_to_the_model_are_a_copy()
+checking_an_encoding_is_checking_its_ids()
+a_padded_batch_flattens_row_by_row()
+a_ragged_batch_is_refused_rather_than_reshaped()
+an_empty_batch_is_refused()
+the_mask_flattens_the_same_way_as_the_ids()
+t.report("skein embed")

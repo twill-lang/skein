@@ -1,0 +1,126 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/wordpiece.tw" as wp
+import "../src/vocab.tw" as vb
+import "../src/pieces.tw" as pc
+import "../src/pretok.tw" as pt
+
+fn build_vocab(words: Arr[Str]) -> vb.Vocab {
+  let v: vb.Vocab = vb.new_vocab()
+  let r: Arr[Str] = ["[UNK]"]
+  vb.add_reserved(v, r, "[UNK]")
+  let i: I64 = 0
+  while i < len(words) {
+    vb.add(v, words[i])
+    i = i + 1
+  }
+  v
+}
+
+fn a_word_in_the_vocabulary_is_one_piece() {
+  let v: vb.Vocab = build_vocab(["play", "##ing"])
+  let m: wp.WordPiece = wp.new_wordpiece(v, "[UNK]")
+  let p: pc.Pieces = wp.encode(m, "play", pt.whitespace("play"))
+  t.equal_i64("one piece", pc.count(p), 1)
+  t.equal_str("the whole word", p.toks[0], "play")
+  t.equal_i64("spanning it", p.nends[0], 4)
+}
+
+fn the_longest_match_is_taken_first() {
+  let v: vb.Vocab = build_vocab(["p", "pl", "play", "##ing", "##i", "##n", "##g"])
+  let m: wp.WordPiece = wp.new_wordpiece(v, "[UNK]")
+  let p: pc.Pieces = wp.encode(m, "playing", pt.whitespace("playing"))
+  t.equal_i64("two pieces and not five", pc.count(p), 2)
+  t.equal_str("the longest prefix", p.toks[0], "play")
+  t.equal_str("and the longest continuation", p.toks[1], "##ing")
+}
+
+fn a_continuation_piece_needs_the_prefix_in_the_vocabulary() {
+  # "ing" is present but "##ing" is not, so the tail cannot be matched and the
+  # whole word falls back.
+  let v: vb.Vocab = build_vocab(["play", "ing"])
+  let m: wp.WordPiece = wp.new_wordpiece(v, "[UNK]")
+  let p: pc.Pieces = wp.encode(m, "playing", pt.whitespace("playing"))
+  t.equal_i64("one piece", pc.count(p), 1)
+  t.equal_str("the unknown token", p.toks[0], "[UNK]")
+}
+
+fn the_fallback_is_the_whole_word_and_not_the_unmatched_tail() {
+  let v: vb.Vocab = build_vocab(["ca", "##t"])
+  let m: wp.WordPiece = wp.new_wordpiece(v, "[UNK]")
+  let p: pc.Pieces = wp.encode(m, "cax", pt.whitespace("cax"))
+  t.equal_i64("one piece, not two", pc.count(p), 1)
+  t.equal_str("the unknown token", p.toks[0], "[UNK]")
+}
+
+fn the_unknown_token_keeps_the_span_of_the_word_it_replaced() {
+  let v: vb.Vocab = build_vocab(["ok"])
+  let m: wp.WordPiece = wp.new_wordpiece(v, "[UNK]")
+  let s: Str = "ok zzz"
+  let p: pc.Pieces = wp.encode(m, s, pt.whitespace(s))
+  t.equal_i64("two pieces", pc.count(p), 2)
+  t.equal_str("the second is unknown", p.toks[1], "[UNK]")
+  t.equal_i64("and it starts where zzz starts", p.nstarts[1], 3)
+  t.equal_i64("and ends where zzz ends", p.nends[1], 6)
+}
+
+fn the_pieces_of_a_matched_word_tile_it_exactly() {
+  let v: vb.Vocab = build_vocab(["un", "##err", "##ing"])
+  let m: wp.WordPiece = wp.new_wordpiece(v, "[UNK]")
+  let p: pc.Pieces = wp.encode(m, "unerring", pt.whitespace("unerring"))
+  t.equal_i64("three pieces", pc.count(p), 3)
+  t.equal_i64("the first starts at 0", p.nstarts[0], 0)
+  t.equal_i64("the second starts where the first ended", p.nstarts[1], p.nends[0])
+  t.equal_i64("the third starts where the second ended", p.nstarts[2], p.nends[1])
+  t.equal_i64("and the last ends at the end of the word", p.nends[2], 8)
+}
+
+fn a_piece_boundary_is_always_a_character_boundary() {
+  # "é" is two bytes. A vocabulary containing only its lead byte must not match
+  # it, because the scan only ever offers whole characters.
+  let v: vb.Vocab = build_vocab([chr(195), chr(195) + chr(169)])
+  let m: wp.WordPiece = wp.new_wordpiece(v, "[UNK]")
+  let s: Str = chr(195) + chr(169)
+  let p: pc.Pieces = wp.encode(m, s, pt.whitespace(s))
+  t.equal_i64("one piece", pc.count(p), 1)
+  t.equal_i64("covering both bytes", p.nends[0] - p.nstarts[0], 2)
+}
+
+fn a_word_longer_than_the_limit_goes_straight_to_unknown() {
+  let v: vb.Vocab = build_vocab(["a", "##a"])
+  let m: wp.WordPiece = wp.new_wordpiece(v, "[UNK]")
+  m.max_chars = 3
+  let p: pc.Pieces = wp.encode(m, "aaaa", pt.whitespace("aaaa"))
+  t.equal_i64("one piece", pc.count(p), 1)
+  t.equal_str("unknown", p.toks[0], "[UNK]")
+}
+
+fn ids_come_back_for_every_piece() {
+  let v: vb.Vocab = build_vocab(["play", "##ing"])
+  let m: wp.WordPiece = wp.new_wordpiece(v, "[UNK]")
+  let p: pc.Pieces = wp.encode(m, "playing", pt.whitespace("playing"))
+  let ids: Arr[I64] = wp.ids(m, p)
+  t.equal_i64("two ids", len(ids), 2)
+  t.equal_i64("play", ids[0], vb.id_of(v, "play"))
+  t.equal_i64("##ing", ids[1], vb.id_of(v, "##ing"))
+}
+
+fn detokenising_joins_continuations_and_spaces_words() {
+  let v: vb.Vocab = build_vocab(["play", "##ing", "now"])
+  let m: wp.WordPiece = wp.new_wordpiece(v, "[UNK]")
+  let toks: Arr[Str] = ["play", "##ing", "now"]
+  t.equal_str("joined", wp.detokenize(m, toks), "playing now")
+}
+
+a_word_in_the_vocabulary_is_one_piece()
+the_longest_match_is_taken_first()
+a_continuation_piece_needs_the_prefix_in_the_vocabulary()
+the_fallback_is_the_whole_word_and_not_the_unmatched_tail()
+the_unknown_token_keeps_the_span_of_the_word_it_replaced()
+the_pieces_of_a_matched_word_tile_it_exactly()
+a_piece_boundary_is_always_a_character_boundary()
+a_word_longer_than_the_limit_goes_straight_to_unknown()
+ids_come_back_for_every_piece()
+detokenising_joins_continuations_and_spaces_words()
+t.report("skein wordpiece")

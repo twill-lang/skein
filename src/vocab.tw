@@ -1,0 +1,486 @@
+mode systems
+
+# vocab.tw: the token table, and the file format that survives a round trip.
+#
+# A vocabulary is two structures that must never disagree: a map from token to
+# id, and an array from id to token. Keeping them as one structure with one set
+# of mutators is the only way that invariant holds, so `Vocab` has no public way
+# to add a token that does not update both.
+#
+# WHY A PARALLEL ARRAY AND NOT JUST THE DICT
+#
+# `Dict[Str, I64]` gives token to id in constant time. The reverse direction is
+# the one a decoder needs on every single output token, and walking the dict for
+# it is linear, which turns decoding a 512-token sequence into a quarter of a
+# million comparisons. The array costs one pointer per token and removes that
+# entirely. Insertion-ordered iteration (docs/self-hosting.md section 1.2) would
+# make the walk deterministic but not fast, so the array is about speed, and the
+# determinism it also buys is a second reason rather than the reason.
+#
+# WHY IDS ARE DENSE AND ASSIGNED IN ORDER
+#
+# An embedding table is a matrix with `vocab` rows (`std/nn`'s
+# `embedding_params(vocab, dim)`), so ids are row indices and a gap in the id
+# space is a row of parameters that receives no gradient and is never used. Ids
+# are therefore 0..n-1 with no holes, and `len(v.toks)` is exactly the number
+# that must be passed to `embedding_params`. `src/embed.tw` does that and says
+# so.
+#
+# RESERVED IDS AT THE FRONT
+#
+# Special tokens take the low ids, before any learned token. Two reasons, and
+# the second is the load-bearing one. First, it makes `[PAD]` id 0, so a padded
+# region of an ids tensor is a run of zeros, which is what every debugging eye
+# is expecting. Second, it makes the special ids independent of the training
+# corpus: retrain on more data, get a bigger vocabulary, and `[CLS]` is still 1.
+# Any downstream code that hardcoded a special id keeps working, and code that
+# hardcodes ids is code that exists whether or not it should.
+
+import "std/text" as text
+
+# `unk_id` is -1 when the vocabulary has no unknown token, which is the correct
+# configuration for a byte-level model: with all 256 bytes in the vocabulary
+# nothing is ever out of vocabulary and an unknown token would be dead weight.
+struct Vocab {
+  ids: Dict[Str, I64],
+  toks: Arr[Str],
+  freqs: Arr[I64],
+  unk_id: I64,
+  reserved: I64,
+}
+
+fn new_vocab() -> Vocab {
+  let d: Dict[Str, I64] = {}
+  let t: Arr[Str] = []
+  let f: Arr[I64] = []
+  Vocab { ids: d, toks: t, freqs: f, unk_id: -1, reserved: 0 }
+}
+
+fn size(v: Vocab) -> I64 = len(v.toks)
+
+# The id of `tok`, or -1.
+#
+# -1 rather than the unknown id, because the two questions are different and
+# conflating them is how an unknown token silently becomes a legitimate one. A
+# caller that wants the fallback asks for it: `id_or_unk`.
+#
+# `dict_has` is assumed to exist. twill's own NEEDS-22 asks for `Opt[V]` from a
+# dict lookup and `match` on it, which would be better; a bare membership test
+# is the smallest thing that unblocks this file. `docs/needs.md` entry 3.
+fn id_of(v: Vocab, tok: Str) -> I64 {
+  if dict_has(v.ids, tok) {
+    return v.ids[tok]
+  }
+  -1
+}
+
+fn contains(v: Vocab, tok: Str) -> Bool = dict_has(v.ids, tok)
+
+fn id_or_unk(v: Vocab, tok: Str) -> I64 {
+  let id: I64 = id_of(v, tok)
+  if id >= 0 {
+    return id
+  }
+  v.unk_id
+}
+
+# The token for an id, or the empty string when the id is out of range.
+#
+# Out of range is a caller bug and returns empty rather than aborting, because
+# the commonest way to reach it is decoding a model's output, and a model that
+# emits a nonsense logit argmax during early training should produce a visibly
+# blank token rather than kill the process.
+fn token_of(v: Vocab, id: I64) -> Str {
+  if id < 0 or id >= len(v.toks) {
+    return ""
+  }
+  v.toks[id]
+}
+
+# Append `tok`, or return its existing id. Frequency starts at 0.
+fn add(v: Vocab, tok: Str) -> I64 {
+  let have: I64 = id_of(v, tok)
+  if have >= 0 {
+    return have
+  }
+  let id: I64 = len(v.toks)
+  push(v.toks, tok)
+  push(v.freqs, 0)
+  v.ids[tok] = id
+  id
+}
+
+# Append the reserved tokens and record how many there are. Must be called on an
+# empty vocabulary, because reserved means "at the front" and adding them later
+# would give them ids above learned tokens, which is the thing the header argues
+# against.
+fn add_reserved(v: Vocab, toks: Arr[Str], unk: Str) -> Str {
+  if len(v.toks) != 0 {
+    return "vocab.add_reserved: reserved tokens must be added to an empty vocabulary"
+  }
+  let i: I64 = 0
+  while i < len(toks) {
+    add(v, toks[i])
+    i = i + 1
+  }
+  v.reserved = len(v.toks)
+  if len(unk) > 0 {
+    let id: I64 = id_of(v, unk)
+    if id < 0 {
+      return "vocab.add_reserved: unknown token " + unk + " is not among the reserved tokens"
+    }
+    v.unk_id = id
+  }
+  ""
+}
+
+fn is_reserved(v: Vocab, id: I64) -> Bool = id >= 0 and id < v.reserved
+
+# ---- counting ---------------------------------------------------------------
+
+# A frequency table with a deterministic iteration order.
+#
+# `keys` duplicates the dict's key set. The subset's dicts iterate in insertion
+# order (docs/self-hosting.md section 1.2) so this is redundant in principle,
+# but there is no way to iterate a `Dict` from twill source today
+# (`docs/needs.md` entry 4), so the array is how this file reads its own table
+# back. It also fixes the order at first-seen rather than at whatever the
+# runtime does, which is the property `build` needs for its tie-break.
+struct Counts {
+  n: Dict[Str, I64],
+  keys: Arr[Str],
+  total: I64,
+}
+
+fn new_counts() -> Counts {
+  let d: Dict[Str, I64] = {}
+  let k: Arr[Str] = []
+  Counts { n: d, keys: k, total: 0 }
+}
+
+fn observe(c: Counts, tok: Str, times: I64) {
+  if dict_has(c.n, tok) {
+    c.n[tok] = c.n[tok] + times
+  } else {
+    c.n[tok] = times
+    push(c.keys, tok)
+  }
+  c.total = c.total + times
+}
+
+fn count_of(c: Counts, tok: Str) -> I64 {
+  if dict_has(c.n, tok) {
+    return c.n[tok]
+  }
+  0
+}
+
+fn distinct(c: Counts) -> I64 = len(c.keys)
+
+# ---- ordering ---------------------------------------------------------------
+
+# Byte-lexicographic less-than. Shorter is less when one is a prefix of the
+# other, which is the ordering every sorted file format on earth uses.
+fn str_less(a: Str, b: Str) -> Bool {
+  let n: I64 = if len(a) < len(b) { len(a) } else { len(b) }
+  let i: I64 = 0
+  while i < n {
+    if a[i] != b[i] {
+      return a[i] < b[i]
+    }
+    i = i + 1
+  }
+  len(a) < len(b)
+}
+
+# Rank order for `build`: descending frequency, ties broken by ascending token
+# bytes.
+#
+# The tie-break is not cosmetic. Two tokens with the same count would otherwise
+# be ordered by hash iteration or by corpus order, and either makes the id
+# assignment depend on something that is not the data. A vocabulary that
+# reassigns ids between two runs over the same corpus invalidates every
+# checkpoint trained against it, and the symptom is a model that produces
+# fluent nonsense, which nobody debugs as a tokeniser problem.
+fn ranks_before(fa: I64, ta: Str, fb: I64, tb: Str) -> Bool {
+  if fa != fb {
+    return fa > fb
+  }
+  str_less(ta, tb)
+}
+
+# Merge sort over an index array. Merge rather than insertion because a
+# vocabulary is tens of thousands of entries and the quadratic version is
+# minutes; merge rather than quicksort because it is stable and because stable
+# plus a total tie-break means the order is a function of the data alone.
+#
+# `docs/needs.md` entry 5: twill's NEEDS-23 asks for a sort in the language, and
+# this is the third copy of one in the ecosystem.
+fn sort_index(idx: Arr[I64], freqs: Arr[I64], toks: Arr[Str]) {
+  let n: I64 = len(idx)
+  if n < 2 {
+    return
+  }
+  let buf: Arr[I64] = []
+  let i: I64 = 0
+  while i < n {
+    push(buf, 0)
+    i = i + 1
+  }
+  let width: I64 = 1
+  while width < n {
+    let lo: I64 = 0
+    while lo < n {
+      let mid: I64 = lo + width
+      let hi: I64 = lo + width + width
+      if mid > n { mid = n }
+      if hi > n { hi = n }
+      let a: I64 = lo
+      let b: I64 = mid
+      let o: I64 = lo
+      while o < hi {
+        let take_left: Bool = false
+        if a < mid and b < hi {
+          take_left = ranks_before(freqs[idx[a]], toks[idx[a]], freqs[idx[b]], toks[idx[b]])
+        } else {
+          take_left = a < mid
+        }
+        if take_left {
+          buf[o] = idx[a]
+          a = a + 1
+        } else {
+          buf[o] = idx[b]
+          b = b + 1
+        }
+        o = o + 1
+      }
+      lo = hi
+    }
+    let k: I64 = 0
+    while k < n {
+      idx[k] = buf[k]
+      k = k + 1
+    }
+    width = width + width
+  }
+}
+
+# ---- building ---------------------------------------------------------------
+
+# Build a vocabulary from counts.
+#
+# `reserved` go in first and are never subject to the cutoff or the size cap: a
+# vocabulary that dropped `[PAD]` because it did not appear in the corpus is a
+# vocabulary that cannot pad.
+#
+# `min_freq` is applied before `max_size`, and that order matters. Applying the
+# cap first and then the cutoff gives a vocabulary smaller than the cap by an
+# amount nobody asked for; this way the cutoff removes the tokens that are
+# genuinely too rare to learn an embedding for, and the cap then removes the
+# tail of what remains. A token dropped by either is not lost: it falls to the
+# unknown token, or, in a byte-level model, decomposes into bytes that are all
+# present.
+#
+# `max_size` of 0 means no cap. `min_freq` of 1 means no cutoff.
+fn build(c: Counts, reserved: Arr[Str], unk: Str, min_freq: I64, max_size: I64) -> Vocab {
+  let v: Vocab = new_vocab()
+  add_reserved(v, reserved, unk)
+
+  let idx: Arr[I64] = []
+  let i: I64 = 0
+  while i < len(c.keys) {
+    push(idx, i)
+    i = i + 1
+  }
+  let freqs: Arr[I64] = []
+  i = 0
+  while i < len(c.keys) {
+    push(freqs, count_of(c, c.keys[i]))
+    i = i + 1
+  }
+  sort_index(idx, freqs, c.keys)
+
+  let limit: I64 = max_size
+  i = 0
+  while i < len(idx) {
+    let k: I64 = idx[i]
+    let tok: Str = c.keys[k]
+    let f: I64 = freqs[k]
+    if f < min_freq {
+      # Sorted by descending frequency, so the first token below the cutoff is
+      # the last one worth looking at.
+      return v
+    }
+    if limit > 0 and len(v.toks) >= limit {
+      return v
+    }
+    if not contains(v, tok) {
+      let id: I64 = add(v, tok)
+      v.freqs[id] = f
+    }
+    i = i + 1
+  }
+  v
+}
+
+# ---- the file format --------------------------------------------------------
+#
+# THE FORMAT, WRITTEN DOWN BECAUSE A FORMAT NOT WRITTEN DOWN IS NOT A FORMAT
+#
+#   line 1        "skein-vocab 1"
+#   line 2        "reserved <n>"        how many leading ids are reserved
+#   line 3        "unk <id>"            the unknown id, or -1
+#   lines 4..     "<hex> <freq>"        one per id, in ascending id order
+#
+# `<hex>` is the token's bytes, lowercase hex, two characters per byte, no
+# separator. `<freq>` is decimal.
+#
+# Hex and not the token itself. A vocabulary contains tokens that are a single
+# space, a single newline, a tab, the byte 0x00, and, in a byte-level model,
+# every one of the 256 byte values including the ones that are not valid UTF-8
+# on their own. Any format that writes the token literally has to escape at
+# least four of those, and every escaping scheme grows a case it forgot.
+# Hex has no cases: it is fixed width, it is total over bytes, and it round
+# trips exactly. It costs a factor of two in file size for a file that is read
+# once at load.
+#
+# The id is the line number and is not written. Writing it would create a second
+# source of truth about a token's id, and the two disagreeing is a corruption
+# that loads successfully.
+#
+# Determinism: the file is a function of the `Vocab` alone. Same vocabulary,
+# same bytes, every time, on every machine. That is what makes a vocabulary
+# hashable, and therefore what makes "is this checkpoint's tokeniser the one I
+# have" a question with an answer.
+
+let HEX: Str = "0123456789abcdef"
+
+fn to_hex(s: Str) -> Str {
+  let b: Bytes = bytes_new()
+  let i: I64 = 0
+  while i < len(s) {
+    let c: I64 = s[i]
+    bytes_push(b, HEX[shr(and(c, 240), 4)])
+    bytes_push(b, HEX[and(c, 15)])
+    i = i + 1
+  }
+  bytes_to_str(b)
+}
+
+# -1 for a character that is not a hex digit, which is how `from_hex` reports
+# corruption without a second return value.
+fn hex_val(c: I64) -> I64 {
+  if c >= 48 and c <= 57 { return c - 48 }
+  if c >= 97 and c <= 102 { return c - 87 }
+  if c >= 65 and c <= 70 { return c - 55 }
+  -1
+}
+
+# The decoded bytes, or the empty string on any malformed input. The caller
+# distinguishes "decoded to empty" from "was malformed" with `hex_ok`, because
+# the empty token is a legitimate thing to store.
+fn hex_ok(s: Str) -> Bool {
+  if and(len(s), 1) != 0 {
+    return false
+  }
+  let i: I64 = 0
+  while i < len(s) {
+    if hex_val(s[i]) < 0 {
+      return false
+    }
+    i = i + 1
+  }
+  true
+}
+
+fn from_hex(s: Str) -> Str {
+  if not hex_ok(s) {
+    return ""
+  }
+  let b: Bytes = bytes_new()
+  let i: I64 = 0
+  while i < len(s) {
+    bytes_push(b, shl(hex_val(s[i]), 4) + hex_val(s[i + 1]))
+    i = i + 2
+  }
+  bytes_to_str(b)
+}
+
+fn save(v: Vocab) -> Str {
+  let out: Bytes = bytes_new()
+  text.push_str(out, "skein-vocab 1\n")
+  text.push_str(out, "reserved " + str(v.reserved) + "\n")
+  text.push_str(out, "unk " + str(v.unk_id) + "\n")
+  let i: I64 = 0
+  while i < len(v.toks) {
+    text.push_str(out, to_hex(v.toks[i]))
+    text.push_str(out, " ")
+    text.push_str(out, str(v.freqs[i]))
+    text.push_str(out, "\n")
+    i = i + 1
+  }
+  bytes_to_str(out)
+}
+
+# Parse `s` into `out`. Empty on success, a message otherwise.
+#
+# Every failure names the line number. A vocabulary file is machine written and
+# a corruption in one is almost always a truncated write or a merge conflict
+# marker, both of which are found instantly given a line number and not at all
+# given "bad vocabulary file".
+fn load(s: Str, out: Vocab) -> Str {
+  let ls: Arr[Str] = text.lines(s)
+  if len(ls) < 3 {
+    return "vocab.load: file has fewer than three header lines"
+  }
+  if not text.equal(ls[0], "skein-vocab 1") {
+    return "vocab.load: line 1: expected 'skein-vocab 1', got '" + ls[0] + "'"
+  }
+  if not text.starts_with(ls[1], "reserved ") {
+    return "vocab.load: line 2: expected 'reserved <n>'"
+  }
+  if not text.starts_with(ls[2], "unk ") {
+    return "vocab.load: line 3: expected 'unk <id>'"
+  }
+  let reserved: I64 = i64_of_str(text.trim_prefix(ls[1], "reserved "))
+  let unk: I64 = i64_of_str(text.trim_prefix(ls[2], "unk "))
+
+  let d: Dict[Str, I64] = {}
+  let t: Arr[Str] = []
+  let f: Arr[I64] = []
+  out.ids = d
+  out.toks = t
+  out.freqs = f
+  out.reserved = reserved
+  out.unk_id = unk
+
+  let i: I64 = 3
+  while i < len(ls) {
+    if len(ls[i]) > 0 {
+      let sp: I64 = text.find(ls[i], " ")
+      if sp < 0 {
+        return "vocab.load: line " + str(i + 1) + ": no space between token and frequency"
+      }
+      let h: Str = text.slice(ls[i], 0, sp)
+      if not hex_ok(h) {
+        return "vocab.load: line " + str(i + 1) + ": token is not an even-length hex string"
+      }
+      let tok: Str = from_hex(h)
+      if dict_has(out.ids, tok) {
+        return "vocab.load: line " + str(i + 1) + ": duplicate token, id would be ambiguous"
+      }
+      let id: I64 = len(out.toks)
+      push(out.toks, tok)
+      push(out.freqs, i64_of_str(text.slice(ls[i], sp + 1, len(ls[i]))))
+      out.ids[tok] = id
+    }
+    i = i + 1
+  }
+  if unk >= len(out.toks) {
+    return "vocab.load: unknown id " + str(unk) + " is beyond the " + str(len(out.toks)) + " tokens in the file"
+  }
+  if reserved > len(out.toks) {
+    return "vocab.load: reserved count " + str(reserved) + " is beyond the " + str(len(out.toks)) + " tokens in the file"
+  }
+  ""
+}

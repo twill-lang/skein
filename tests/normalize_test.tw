@@ -1,0 +1,136 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/normalize.tw" as nm
+
+# The test the whole package exists for. "Hello   World" collapses to
+# "hello world", so the normalised offset of "World" is 6 and its source offset
+# is 8. A normaliser without a trace reports 6, which is the "o" of "Hello".
+fn an_offset_survives_whitespace_collapsing() {
+  let n: nm.Norm = nm.blank()
+  let err: Str = nm.apply(nm.spec_default(), "Hello   World", n)
+  t.equal_str("the spec was accepted", err, "")
+  t.equal_str("the normalised text", n.text, "hello world")
+  let s: nm.Span = nm.map_span(n, 6, 11)
+  t.equal_i64("World starts at source byte 8", s.start, 8)
+  t.equal_i64("World ends at source byte 13", s.end, 13)
+}
+
+fn the_collapsed_space_spans_the_whole_run_it_replaced() {
+  let n: nm.Norm = nm.blank()
+  nm.apply(nm.spec_default(), "a\t\n\n  b", n)
+  t.equal_str("a run of five whitespace bytes became one", n.text, "a b")
+  let s: nm.Span = nm.map_span(n, 1, 2)
+  t.equal_i64("the space starts where the run started", s.start, 1)
+  t.equal_i64("the space ends where the run ended", s.end, 6)
+}
+
+fn stripping_a_control_character_shifts_every_later_offset() {
+  let n: nm.Norm = nm.blank()
+  # A vertical-tab-free string with one 0x07 bell in the middle.
+  nm.apply(nm.spec_cased(), "ab" + chr(7) + "cd", n)
+  t.equal_str("the bell is gone", n.text, "abcd")
+  let s: nm.Span = nm.map_span(n, 2, 4)
+  t.equal_i64("cd starts at source byte 3", s.start, 3)
+  t.equal_i64("cd ends at source byte 5", s.end, 5)
+}
+
+fn a_c1_control_is_two_bytes_and_is_removed_as_one() {
+  let n: nm.Norm = nm.blank()
+  nm.apply(nm.spec_cased(), "x" + chr(194) + chr(133) + "y", n)
+  t.equal_str("the C1 pair is gone", n.text, "xy")
+  let s: nm.Span = nm.map_span(n, 1, 2)
+  t.equal_i64("y is at source byte 3", s.start, 3)
+}
+
+fn ascii_casing_leaves_multibyte_bytes_alone() {
+  let n: nm.Norm = nm.blank()
+  # "CAFÉ" with É as U+00C9, two bytes 0xC3 0x89.
+  nm.apply(nm.spec_cased(), "CAF" + chr(195) + chr(137), n)
+  t.equal_i64("cased spec kept five bytes", nm.norm_len(n), 5)
+  let m: nm.Norm = nm.blank()
+  nm.apply(nm.spec_default(), "CAF" + chr(195) + chr(137), m)
+  t.equal_i64("lowercasing did not change the byte count", nm.norm_len(m), 5)
+  t.equal_i64("the accented character was not touched", m.text[3], 195)
+  t.equal_i64("nor its continuation byte", m.text[4], 137)
+}
+
+fn latin1_folding_can_lengthen_and_the_trace_still_points_at_one_character() {
+  let spec: nm.NormSpec = nm.spec_none()
+  spec.fold_latin1 = true
+  let n: nm.Norm = nm.blank()
+  # "straße": the sharp s is U+00DF, two bytes 0xC3 0x9F, folding to "ss".
+  nm.apply(spec, "stra" + chr(195) + chr(159) + "e", n)
+  t.equal_str("the sharp s became two ASCII bytes", n.text, "strasse")
+  let first: nm.Span = nm.map_span(n, 4, 5)
+  let second: nm.Span = nm.map_span(n, 5, 6)
+  t.equal_i64("the first s covers the whole original character", first.start, 4)
+  t.equal_i64("and ends after both of its bytes", first.end, 6)
+  t.equal_i64("the second s covers the same character", second.start, 4)
+  t.equal_i64("and the same two bytes", second.end, 6)
+}
+
+fn folding_runs_before_lowercasing() {
+  let spec: nm.NormSpec = nm.spec_none()
+  spec.fold_latin1 = true
+  spec.lower_ascii = true
+  let n: nm.Norm = nm.blank()
+  # U+00C0, capital A with grave, folds to "A" and must then lowercase to "a".
+  nm.apply(spec, chr(195) + chr(128) + "bc", n)
+  t.equal_str("the folded capital was lowercased too", n.text, "abc")
+}
+
+fn nfc_is_refused_and_not_approximated() {
+  let spec: nm.NormSpec = nm.spec_default()
+  spec.nfc = true
+  let n: nm.Norm = nm.blank()
+  let err: Str = nm.apply(spec, "anything", n)
+  t.check("asking for NFC returns a message", len(err) > 0)
+}
+
+fn trimming_both_ends_leaves_the_inner_offsets_intact() {
+  let n: nm.Norm = nm.blank()
+  nm.apply(nm.spec_default(), "   middle   ", n)
+  t.equal_str("the ends are gone", n.text, "middle")
+  let s: nm.Span = nm.map_span(n, 0, 6)
+  t.equal_i64("middle starts at source byte 3", s.start, 3)
+  t.equal_i64("middle ends at source byte 9", s.end, 9)
+}
+
+fn an_empty_span_is_empty_and_not_a_zero_width_span_at_zero() {
+  let n: nm.Norm = nm.blank()
+  nm.apply(nm.spec_default(), "abc", n)
+  let s: nm.Span = nm.map_span(n, 2, 2)
+  t.check("an empty normalised range gives an empty span", nm.span_is_empty(s))
+  t.equal_i64("and its start is -1", s.start, -1)
+}
+
+fn the_identity_normalisation_is_the_identity() {
+  let n: nm.Norm = nm.identity("hello")
+  t.equal_str("the text is unchanged", n.text, "hello")
+  let s: nm.Span = nm.map_span(n, 1, 3)
+  t.equal_i64("and so are the offsets", s.start, 1)
+  t.equal_i64("both of them", s.end, 3)
+}
+
+fn character_boundaries_are_reported_over_the_normalised_text() {
+  let n: nm.Norm = nm.identity("a" + chr(195) + chr(169) + "b")
+  t.check("byte 0 is a boundary", nm.is_char_boundary(n, 0))
+  t.check("byte 1 is a boundary", nm.is_char_boundary(n, 1))
+  t.check("byte 2 is a continuation byte", not nm.is_char_boundary(n, 2))
+  t.check("byte 3 is a boundary", nm.is_char_boundary(n, 3))
+}
+
+an_offset_survives_whitespace_collapsing()
+the_collapsed_space_spans_the_whole_run_it_replaced()
+stripping_a_control_character_shifts_every_later_offset()
+a_c1_control_is_two_bytes_and_is_removed_as_one()
+ascii_casing_leaves_multibyte_bytes_alone()
+latin1_folding_can_lengthen_and_the_trace_still_points_at_one_character()
+folding_runs_before_lowercasing()
+nfc_is_refused_and_not_approximated()
+trimming_both_ends_leaves_the_inner_offsets_intact()
+an_empty_span_is_empty_and_not_a_zero_width_span_at_zero()
+the_identity_normalisation_is_the_identity()
+character_boundaries_are_reported_over_the_normalised_text()
+t.report("skein normalize")

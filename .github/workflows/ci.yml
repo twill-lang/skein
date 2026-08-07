@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# skein cannot be run yet: it is written in twill's systems subset, which is
+# still being implemented. So CI gates on what is checkable today and says
+# plainly that it is not checking behaviour. When `mode systems` lands, the gate
+# becomes `twill run tests/*.tw` and these checks stay.
+#
+# The forbidden strings are assembled at runtime rather than written out, so
+# that this workflow does not fail its own checks.
+jobs:
+  source-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every source file is twill
+        run: |
+          stray=$(find . -path ./.git -prune -o -type f \
+            ! -name '*.tw' ! -name '*.md' ! -name '*.yml' ! -name '*.toml' \
+            ! -name 'LICENSE' ! -name '.gitignore' -print)
+          if [ -n "$stray" ]; then
+            echo "skein is written in twill; these files are neither .tw nor documentation:"
+            echo "$stray"
+            exit 1
+          fi
+
+      - name: No reference to the old language name
+        run: |
+          old=$(printf 'ras'; printf 'ter')
+          if grep -rni "$old" --include='*.tw' --include='*.md' --include='*.toml' .; then
+            echo "the language is twill"
+            exit 1
+          fi
+
+      - name: No file carries the old source extension
+        run: |
+          old=$(printf '*.r'; printf 'a')
+          if find . -name "$old" | grep .; then
+            echo "twill source is .tw"
+            exit 1
+          fi
+          if grep -rn "$(printf '\\.r'; printf 'a\\b')" --include='*.tw' --include='*.md' .; then
+            echo "twill source is .tw"
+            exit 1
+          fi
+
+      - name: No em dashes
+        run: |
+          dash=$(printf '\xe2\x80\x94')
+          if grep -rn "$dash" --include='*.tw' --include='*.md' --include='*.toml' .; then
+            echo "em dashes are not used in this repository"
+            exit 1
+          fi
+
+      - name: Every twill source declares its mode
+        run: |
+          for f in $(find . -name '*.tw'); do
+            if [ "$(head -n 1 "$f")" != "mode systems" ]; then
+              echo "$f does not start with 'mode systems'"
+              exit 1
+            fi
+          done
+
+      - name: The README does not claim skein works
+        run: |
+          grep -q 'skein does not run yet' README.md || {
+            echo "README.md must state that skein does not run yet"
+            exit 1
+          }
+
+      - name: The README states what unicode is not possible
+        run: |
+          # The honest statement, checked so that a future edit cannot quietly
+          # drop it and leave the package looking like it does full Unicode
+          # normalisation. See docs/needs.md entry 1.
+          grep -q 'no Unicode character database' README.md || {
+            echo "README.md must say plainly that there is no Unicode character database"
+            exit 1
+          }
+          grep -q 'NFC' README.md || {
+            echo "README.md must state that NFC is refused rather than approximated"
+            exit 1
+          }
+
+      - name: Every needs entry names a file
+        run: |
+          # A needs entry without a file to look at is a wish, not a work item.
+          missing=$(grep -c '^### ' docs/needs.md)
+          named=$(grep -c '^\*\*\(Used by\|Would improve\|Needs\)' docs/needs.md)
+          if [ "$named" -lt "$missing" ]; then
+            echo "docs/needs.md has $missing entries and only $named name a file"
+            exit 1
+          fi
+
+      - name: Offsets are computed in one place
+        run: |
+          # The design claim in README.md: only src/encoding.tw maps a
+          # normalised span back to the source. If another file starts calling
+          # map_span, either the claim or the code is wrong.
+          callers=$(grep -rl 'map_span' --include='*.tw' src/ || true)
+          for f in $callers; do
+            if [ "$f" != "src/encoding.tw" ] && [ "$f" != "src/normalize.tw" ]; then
+              echo "$f calls map_span; only src/encoding.tw may"
+              exit 1
+            fi
+          done

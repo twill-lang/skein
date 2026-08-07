@@ -1,0 +1,146 @@
+mode systems
+
+# A complete skein pipeline: train a byte-level BPE tokeniser on a small
+# corpus, encode a batch with padding and offsets, check the offsets against
+# the source text, and hand the ids to `std/nn`'s embedding.
+#
+# Run it from the project root:
+#
+#   twill run examples/pipeline.tw
+#
+# It does not run. See the README.
+
+import "../src/normalize.tw" as nm
+import "../src/pretok.tw" as pt
+import "../src/bpe.tw" as bpe
+import "../src/vocab.tw" as vb
+import "../src/pieces.tw" as pc
+import "../src/encoding.tw" as enc
+import "../src/sequence.tw" as sq
+import "../src/embed.tw" as em
+
+import "std/nn" as nn
+
+let MERGES = 400
+let MIN_PAIR = 2
+let MAX_LEN = 16
+let DIM = 64
+
+# ---- the corpus -------------------------------------------------------------
+
+# Small enough to read, large enough that the merges are not all singletons.
+let CORPUS: Arr[Str] = [
+  "the cat sat on the mat",
+  "the cat sat on the hat",
+  "the dog sat on the log",
+  "the dog ate the cat's hat",
+  "a cat and a dog and a hat",
+]
+
+# What we will encode. Deliberately awkward: a capital, a run of spaces, and a
+# multi-byte character, so the offsets have something to survive.
+let DOCS: Arr[Str] = [
+  "The  cat sat",
+  "A dog ate the caf" + chr(195) + chr(169) + " hat",
+  "the mat",
+]
+
+# ---- one document, end to end -----------------------------------------------
+
+# Normalise, pre-tokenise, encode, wrap in specials, truncate.
+#
+# The `Norm` is handed back through `out_norm`, and nothing downstream needs
+# it: the offsets in the encoding are already source offsets. It is returned so
+# this example can print the normalised string next to the source and show that
+# the two really do differ.
+fn encode_one(m: bpe.Bpe, sp: enc.Specials, src: Str, out_norm: nm.Norm) -> enc.Encoding {
+  nm.apply(nm.spec_default(), src, out_norm)
+  let p: pc.Pieces = bpe.encode(m, out_norm.text, pt.whitespace(out_norm.text))
+  enc.build_single(out_norm, p, m.v, sp, MAX_LEN, enc.TRUNC_RIGHT)
+}
+
+fn main() {
+  # ---- train ----------------------------------------------------------------
+  #
+  # The reserved tokens go in before the byte alphabet, so [PAD] is id 0 and
+  # stays id 0 no matter how much corpus is added later.
+  let reserved: Arr[Str] = ["[PAD]", "[CLS]", "[SEP]", "[MASK]"]
+  let m: bpe.Bpe = bpe.train(CORPUS, MERGES, MIN_PAIR, reserved, true, false)
+  print("vocabulary: " + str(vb.size(m.v)) + " tokens, " +
+        str(bpe.num_merges(m)) + " merges")
+
+  # There is no [UNK]: byte-level BPE cannot produce one.
+  let sp: enc.Specials = enc.no_specials()
+  let err: Str = enc.specials_from(m.v, "[CLS]", "[SEP]", "[PAD]", "", "[MASK]", sp)
+  if len(err) > 0 {
+    print("skein: " + err)
+    return
+  }
+
+  # ---- encode a batch -------------------------------------------------------
+  let batch: enc.Batch = enc.new_batch()
+  let norms: Arr[nm.Norm] = []
+  let i: I64 = 0
+  while i < len(DOCS) {
+    let n: nm.Norm = nm.blank()
+    let e: enc.Encoding = encode_one(m, sp, DOCS[i], n)
+    push(norms, n)
+    enc.batch_add(batch, e)
+    i = i + 1
+  }
+
+  let perr: Str = enc.pad_batch_longest(batch, sp, enc.PAD_RIGHT)
+  if len(perr) > 0 {
+    print("skein: " + perr)
+    return
+  }
+  print("batch: " + str(enc.batch_size(batch)) + " rows of " +
+        str(enc.longest(batch)) + ", " + str(enc.pad_waste(batch)) +
+        " padding positions")
+
+  # ---- the offsets ----------------------------------------------------------
+  #
+  # The whole point. `source_text` slices the ORIGINAL document, capitals,
+  # double spaces, accents and all, using the offset the tokeniser recorded
+  # through the normalisation trace.
+  print("")
+  print("row 1, normalised: " + norms[1].text)
+  print("row 1, token spans against the source:")
+  let e1: enc.Encoding = batch.items[1]
+  let k: I64 = 0
+  while k < enc.length(e1) {
+    if e1.mask[k] == 1 and not e1.special[k] {
+      print("  " + str(e1.starts[k]) + ".." + str(e1.ends[k]) + "  '" +
+            enc.source_text(e1, k, DOCS[1]) + "'")
+    }
+    k = k + 1
+  }
+
+  # ---- windows --------------------------------------------------------------
+  let win: enc.Batch = sq.windows_overlapping(batch.items[1], 6, 2)
+  print("")
+  print("row 1 in windows of 6 with an overlap of 2: " +
+        str(enc.batch_size(win)) + " windows")
+
+  # ---- the model ------------------------------------------------------------
+  #
+  # skein stops here. The table belongs to the model and is allocated by
+  # `std/nn`; skein hands over ids and a mask and owns neither.
+  let table = em.table(vb.size(m.v), DIM)
+  let cerr: Str = em.check_encoding(batch.items[0], vb.size(m.v))
+  if len(cerr) > 0 {
+    print("skein: " + cerr)
+    return
+  }
+  let rows = em.embed(table, batch.items[0])
+  print("")
+  print("embedded row 0: " + str(enc.length(batch.items[0])) + " positions of " + str(DIM))
+
+  # The mask goes to the attention, not to the embedding. It is fetched here so
+  # that the example does not model the mistake of dropping it.
+  let mask: Arr[I64] = []
+  em.batch_mask(batch, mask)
+  print("mask: " + str(len(mask)) + " entries")
+}
+
+main()

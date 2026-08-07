@@ -1,0 +1,101 @@
+mode systems
+
+# The strictest offset test in the repository, on purpose. These two tokenisers
+# are short enough to be obviously correct, so a span property that fails here
+# is a bug in the property and not in the model.
+
+import "harness.tw" as t
+import "../src/simple.tw" as sp
+import "../src/vocab.tw" as vb
+import "../src/pieces.tw" as pc
+import "../src/pretok.tw" as pt
+import "std/text" as text
+
+fn every_whitespace_piece_equals_the_text_at_its_own_span() {
+  let s: Str = "the cat  sat"
+  let p: pc.Pieces = sp.whitespace(s, pt.whitespace(s))
+  let i: I64 = 0
+  while i < pc.count(p) {
+    t.equal_str("piece " + str(i) + " matches its span",
+                text.slice(s, p.nstarts[i], p.nends[i]), p.toks[i])
+    i = i + 1
+  }
+  t.equal_i64("three pieces", pc.count(p), 3)
+}
+
+fn every_character_piece_equals_the_text_at_its_own_span() {
+  let s: Str = "a" + chr(195) + chr(169) + "b c"
+  let p: pc.Pieces = sp.characters(s, pt.whitespace(s))
+  let i: I64 = 0
+  while i < pc.count(p) {
+    t.equal_str("piece " + str(i) + " matches its span",
+                text.slice(s, p.nstarts[i], p.nends[i]), p.toks[i])
+    i = i + 1
+  }
+  t.equal_i64("four characters, the space is not one", pc.count(p), 4)
+}
+
+fn character_pieces_never_split_a_multibyte_character() {
+  let s: Str = chr(226) + chr(130) + chr(172)
+  let p: pc.Pieces = sp.characters(s, pt.whitespace(s))
+  t.equal_i64("one piece", pc.count(p), 1)
+  t.equal_i64("three bytes wide", p.nends[0] - p.nstarts[0], 3)
+}
+
+fn a_truncated_multibyte_sequence_advances_by_one_byte() {
+  # A lead byte announcing three bytes with only one present. The character
+  # tokeniser must make progress rather than run off the end of the pre-token.
+  let s: Str = chr(226)
+  let p: pc.Pieces = sp.characters(s, pt.whitespace(s))
+  t.equal_i64("one piece", pc.count(p), 1)
+  t.equal_i64("one byte wide", p.nends[0] - p.nstarts[0], 1)
+}
+
+fn character_spans_tile_their_pre_token_with_no_gap_and_no_overlap() {
+  let s: Str = "abc def"
+  let p: pc.Pieces = sp.characters(s, pt.whitespace(s))
+  t.equal_i64("six pieces", pc.count(p), 6)
+  t.equal_i64("the first starts at 0", p.nstarts[0], 0)
+  t.equal_i64("the third ends at 3", p.nends[2], 3)
+  t.equal_i64("the fourth starts at 4, skipping the space", p.nstarts[3], 4)
+  t.equal_i64("the last ends at 7", p.nends[5], 7)
+}
+
+fn an_absent_token_takes_the_unknown_id() {
+  let v: vb.Vocab = vb.new_vocab()
+  let r: Arr[Str] = ["[UNK]"]
+  vb.add_reserved(v, r, "[UNK]")
+  vb.add(v, "cat")
+  let s: Str = "cat dog"
+  let p: pc.Pieces = sp.whitespace(s, pt.whitespace(s))
+  let ids: Arr[I64] = sp.ids(v, p)
+  t.equal_i64("cat has its own id", ids[0], vb.id_of(v, "cat"))
+  t.equal_i64("dog is unknown", ids[1], 0)
+}
+
+fn a_vocabulary_with_no_unknown_token_gives_minus_one() {
+  let v: vb.Vocab = vb.new_vocab()
+  vb.add(v, "cat")
+  let s: Str = "dog"
+  let ids: Arr[I64] = sp.ids(v, sp.whitespace(s, pt.whitespace(s)))
+  t.equal_i64("minus one, which src/embed.tw refuses", ids[0], -1)
+}
+
+fn counting_pieces_feeds_a_vocabulary_build() {
+  let c: vb.Counts = vb.new_counts()
+  let s: Str = "a b a"
+  sp.count_pieces(c, sp.whitespace(s, pt.whitespace(s)))
+  t.equal_i64("two distinct", vb.distinct(c), 2)
+  t.equal_i64("a twice", vb.count_of(c, "a"), 2)
+  t.equal_i64("b once", vb.count_of(c, "b"), 1)
+}
+
+every_whitespace_piece_equals_the_text_at_its_own_span()
+every_character_piece_equals_the_text_at_its_own_span()
+character_pieces_never_split_a_multibyte_character()
+a_truncated_multibyte_sequence_advances_by_one_byte()
+character_spans_tile_their_pre_token_with_no_gap_and_no_overlap()
+an_absent_token_takes_the_unknown_id()
+a_vocabulary_with_no_unknown_token_gives_minus_one()
+counting_pieces_feeds_a_vocabulary_build()
+t.report("skein simple")

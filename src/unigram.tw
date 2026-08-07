@@ -1,0 +1,282 @@
+mode systems
+
+# unigram.tw: a table of log probabilities, and a Viterbi over the lattice.
+#
+# THE MODEL
+#
+# Every piece has a log probability. The probability of a segmentation is the
+# product of its pieces' probabilities, and encoding means finding the
+# segmentation with the highest product. There is no merge order and no greedy
+# rule: the model is the numbers, and encoding is an optimisation over them.
+#
+# That is the interesting property. BPE and WordPiece both encode by a local
+# rule, so a piece chosen early cannot be reconsidered when it turns out to
+# strand an awkward remainder. Unigram optimises the whole word at once, so it
+# will accept a slightly less likely first piece to get a much more likely rest.
+# The cost is that encoding is a dynamic program rather than a scan.
+#
+# WHY LOG PROBABILITIES AND NOT PROBABILITIES
+#
+# A 200-byte word segmented into 40 pieces multiplies 40 numbers each around
+# 1e-4. That is 1e-160, which is inside float64's range but well into the
+# subnormals, where the relative error of every subsequent multiplication grows.
+# Two segmentations whose true scores differ by a factor of three can compare
+# equal. In logs the same computation is 40 additions of numbers around -9, the
+# arithmetic is exact to the last bit, and the comparison is a comparison of
+# numbers near -370 rather than of two denormals.
+#
+# THE VITERBI
+#
+# The lattice: a node at every character boundary of the word, and an edge from
+# boundary i to boundary j for every piece in the vocabulary whose bytes equal
+# the word's bytes between them. `best[j]` is the highest total log probability
+# of any path from 0 to j, and it is computed from `best[i]` for i < j, which is
+# correct because the score of a path is the sum of its edges and adding an edge
+# to the best prefix path gives the best path through that edge. That is the
+# whole argument, and it is why this is a linear-time dynamic program and not a
+# search.
+#
+# `back[j]` records the boundary the winning edge started at, so the
+# segmentation is recovered by walking backwards from the end. Recovering it
+# forwards is not possible: the best path to the end is not built from the best
+# path to each intermediate node in a way you can read off going forwards.
+#
+# Boundaries are CHARACTER boundaries, not byte boundaries. A byte-boundary
+# lattice would let a piece start in the middle of a multi-byte character, which
+# no real piece does, and would multiply the edge count for nothing.
+#
+# THE UNKNOWN EDGE
+#
+# There is always an edge of length one character, scored `unk_logp`, whether or
+# not that character is a piece. Without it a word containing an unseen
+# character has no path at all and the dynamic program returns nothing, and
+# "returns nothing" is not an outcome a tokeniser is allowed to have.
+# `unk_logp` must be worse than any real piece's score, which is checked at
+# construction rather than assumed.
+
+import "std/text" as text
+import "../src/vocab.tw" as vocab
+import "../src/pieces.tw" as pieces
+import "../src/pretok.tw" as pretok
+
+# A score no real path can reach, standing in for "unreachable". Written as a
+# literal rather than derived, because there is no negative infinity in the
+# subset and a computed sentinel could be reached by a long enough word of very
+# unlikely pieces. -1e18 cannot: a path of a million pieces each at -100 sums to
+# -1e8.
+let UNREACHABLE: F64 = -1000000000000000000.0
+
+# `logp[i]` is the log probability of the token with id `i` in `v`.
+#
+# A parallel array rather than a `Dict[Str, F64]`, because the lookup happens
+# once per lattice edge and the edge count is quadratic in the word length. Two
+# lookups (dict for the id, array for the score) beat one dict lookup for a
+# combined key, and the id is needed anyway.
+#
+# `max_piece_bytes` bounds the inner loop of the Viterbi. Without it the
+# quadratic is over the whole word; with it the work is linear in the word
+# length times a constant. It must be at least as large as the longest piece in
+# the vocabulary or that piece becomes unreachable, which `validate` checks.
+struct Unigram {
+  v: vocab.Vocab,
+  logp: Arr[F64],
+  unk: Str,
+  unk_logp: F64,
+  max_piece_bytes: I64,
+}
+
+fn new_unigram(v: vocab.Vocab, unk: Str, unk_logp: F64) -> Unigram {
+  let lp: Arr[F64] = []
+  let i: I64 = 0
+  while i < vocab.size(v) {
+    push(lp, UNREACHABLE)
+    i = i + 1
+  }
+  Unigram { v: v, logp: lp, unk: unk, unk_logp: unk_logp, max_piece_bytes: 16 }
+}
+
+fn set_logp(m: Unigram, tok: Str, lp: F64) -> Str {
+  let id: I64 = vocab.id_of(m.v, tok)
+  if id < 0 {
+    return "unigram.set_logp: '" + tok + "' is not in the vocabulary"
+  }
+  m.logp[id] = lp
+  ""
+}
+
+fn logp_of(m: Unigram, id: I64) -> F64 {
+  if id < 0 or id >= len(m.logp) {
+    return UNREACHABLE
+  }
+  m.logp[id]
+}
+
+# Fit the log probabilities from observed counts, as relative frequencies.
+#
+# This is maximum likelihood on the pieces as they were counted, not the EM
+# procedure that derives a unigram vocabulary by pruning from a large seed set.
+# The difference is worth stating: real unigram training alternates a Viterbi
+# (or a forward-backward) segmentation of the corpus with a re-estimation of the
+# probabilities, and prunes the pieces whose removal costs least likelihood.
+# skein does the estimation step and not the pruning loop; the vocabulary comes
+# from `src/vocab.tw`. `docs/needs.md` entry 7 records what that leaves out and
+# why the loop is not written yet.
+#
+# A piece with zero count gets `unk_logp` rather than negative infinity, so it
+# stays in the lattice at the same cost as the unknown fallback. Removing it
+# from the lattice would be the other defensible choice and it makes the model's
+# behaviour depend on a count that may be zero only because the corpus was
+# small.
+fn fit(m: Unigram, c: vocab.Counts) -> Str {
+  if c.total <= 0 {
+    return "unigram.fit: the counts are empty, every log probability would be undefined"
+  }
+  let total: F64 = f64_of_i64(c.total)
+  let i: I64 = 0
+  while i < vocab.size(m.v) {
+    let n: I64 = vocab.count_of(c, vocab.token_of(m.v, i))
+    if n > 0 {
+      m.logp[i] = f64_log(f64_of_i64(n) / total)
+    } else {
+      m.logp[i] = m.unk_logp
+    }
+    i = i + 1
+  }
+  ""
+}
+
+# Checks the two invariants the Viterbi assumes.
+fn validate(m: Unigram) -> Str {
+  let i: I64 = 0
+  let longest: I64 = 0
+  while i < vocab.size(m.v) {
+    let t: Str = vocab.token_of(m.v, i)
+    if len(t) > longest {
+      longest = len(t)
+    }
+    if m.logp[i] > 0.0 {
+      return "unigram.validate: '" + t + "' has a positive log probability, which is a probability above 1"
+    }
+    i = i + 1
+  }
+  if longest > m.max_piece_bytes {
+    return "unigram.validate: max_piece_bytes is " + str(m.max_piece_bytes) +
+           " but the vocabulary contains a piece of " + str(longest) +
+           " bytes, which the lattice would never reach"
+  }
+  ""
+}
+
+# ---- the Viterbi ------------------------------------------------------------
+
+# Encode one word given as a byte range of `s`.
+#
+# `best[k]` is the score of the best path ending at character boundary k;
+# `back[k]` is the boundary the winning edge came from, and `bid[k]` is the id
+# of the piece on it, or -1 for the unknown edge.
+fn encode_word(m: Unigram, s: Str, a: I64, b: I64, out: pieces.Pieces) {
+  let w: Str = text.slice(s, a, b)
+  let starts: Arr[I64] = text.char_starts(w)
+  let nchars: I64 = len(starts) - 1
+  if nchars == 0 {
+    return
+  }
+
+  let best: Arr[F64] = []
+  let back: Arr[I64] = []
+  let bid: Arr[I64] = []
+  let k: I64 = 0
+  while k <= nchars {
+    push(best, UNREACHABLE)
+    push(back, -1)
+    push(bid, -1)
+    k = k + 1
+  }
+  best[0] = 0.0
+
+  let j: I64 = 1
+  while j <= nchars {
+    # Candidate edges ending at boundary j, from every boundary i to its left
+    # that is within the longest possible piece.
+    let i: I64 = j - 1
+    while i >= 0 and starts[j] - starts[i] <= m.max_piece_bytes {
+      if best[i] > UNREACHABLE {
+        let piece: Str = text.slice(w, starts[i], starts[j])
+        let id: I64 = vocab.id_of(m.v, piece)
+        let score: F64 = UNREACHABLE
+        let use_id: I64 = -1
+        if id >= 0 {
+          score = best[i] + logp_of(m, id)
+          use_id = id
+        }
+        # The unknown edge exists only for a single character, so that a word
+        # cannot be swallowed whole by one cheap unknown token.
+        if i == j - 1 {
+          let ucand: F64 = best[i] + m.unk_logp
+          if id < 0 or ucand > score {
+            score = ucand
+            use_id = -1
+          }
+        }
+        if score > UNREACHABLE and score > best[j] {
+          best[j] = score
+          back[j] = i
+          bid[j] = use_id
+        }
+      }
+      i = i - 1
+    }
+    j = j + 1
+  }
+
+  # Walk back. `back` is a total function on reachable boundaries because the
+  # single-character unknown edge guarantees every boundary has a predecessor.
+  let rev_start: Arr[I64] = []
+  let rev_stop: Arr[I64] = []
+  let rev_id: Arr[I64] = []
+  let at: I64 = nchars
+  while at > 0 {
+    push(rev_start, back[at])
+    push(rev_stop, at)
+    push(rev_id, bid[at])
+    at = back[at]
+  }
+  let r: I64 = len(rev_start) - 1
+  while r >= 0 {
+    let lo: I64 = starts[rev_start[r]]
+    let hi: I64 = starts[rev_stop[r]]
+    let tok: Str = if rev_id[r] >= 0 { vocab.token_of(m.v, rev_id[r]) } else { m.unk }
+    pieces.add(out, tok, a + lo, a + hi)
+    r = r - 1
+  }
+}
+
+fn encode(m: Unigram, s: Str, p: pretok.PreTok) -> pieces.Pieces {
+  let out: pieces.Pieces = pieces.new_pieces()
+  let i: I64 = 0
+  while i < pretok.count(p) {
+    encode_word(m, s, p.starts[i], p.ends[i], out)
+    i = i + 1
+  }
+  out
+}
+
+# The total log probability the Viterbi assigned to a word. Useful on its own:
+# it is a length-normalisable score for "how much does this model expect this
+# string", which is how a unigram vocabulary is compared against another one.
+fn score_word(m: Unigram, w: Str) -> F64 {
+  let out: pieces.Pieces = pieces.new_pieces()
+  encode_word(m, w, 0, len(w), out)
+  let total: F64 = 0.0
+  let i: I64 = 0
+  while i < len(out.toks) {
+    let id: I64 = vocab.id_of(m.v, out.toks[i])
+    if id >= 0 {
+      total = total + logp_of(m, id)
+    } else {
+      total = total + m.unk_logp
+    }
+    i = i + 1
+  }
+  total
+}

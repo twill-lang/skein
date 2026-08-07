@@ -1,0 +1,649 @@
+mode systems
+
+# encoding.tw: the output of a tokeniser, and the only place offsets are
+# computed.
+#
+# THE BUG THIS FILE EXISTS TO NOT SHIP
+#
+# An offset that points into the normalised string instead of the source.
+#
+# It is the default outcome of every reasonable-looking implementation. You
+# normalise, you tokenise the normalised string, and the tokeniser naturally
+# reports positions in the string it was given. Those positions are correct
+# against a string the user has never seen. On ASCII input with no whitespace
+# runs the two strings are identical and every test passes. The moment the input
+# has a run of spaces, a control character, an accented letter or an uppercase
+# sharp s, the two strings differ in length and every offset after that point is
+# wrong by an amount that grows through the document. Nothing errors. The
+# highlight is one character off at the top of the page and four words off at
+# the bottom, and it gets reported as a rendering bug.
+#
+# skein's answer is structural, not a matter of care:
+#
+#   1. A model returns `Pieces`, whose spans are explicitly named `nstarts` and
+#      `nends` and are explicitly normalised-text offsets. A model never sees
+#      the source string and cannot produce a source offset at all.
+#   2. This file, in `from_pieces`, is the only code in the package that calls
+#      `normalize.map_span`, and it is the only code that writes `starts` and
+#      `ends` on an `Encoding`.
+#   3. Everything downstream (specials, truncation, padding, windowing) moves
+#      spans around and never computes one.
+#
+# So the review question "is this offset in the right coordinate system" has one
+# place to look, and a wrong answer anywhere else is impossible rather than
+# unlikely.
+#
+# SPECIAL TOKENS HAVE EMPTY SPANS
+#
+# `[CLS]`, `[SEP]` and `[PAD]` came from nowhere in the source. Their span is
+# `(-1, -1)` and not `(0, 0)`.
+#
+# `(0, 0)` is the common choice and it is wrong in a way that is worse than
+# useless: it is a valid offset. A caller mapping tokens back to text gets a
+# zero-width span at the very start of the document for every special token, and
+# a caller computing "which source characters did the model attend to" sums a
+# contribution at offset 0 that came from a token with no source at all. -1
+# cannot be dereferenced by accident: it is out of range for every string, so
+# the first attempt to use it as an offset fails visibly.
+
+import "std/text" as text
+import "../src/normalize.tw" as normalize
+import "../src/vocab.tw" as vocab
+import "../src/pieces.tw" as pieces
+
+# Seven parallel arrays, all of the same length, which is the sequence length.
+#
+# Parallel arrays rather than an array of per-token structs, because every
+# consumer wants a column: `std/nn`'s embedding wants the ids and nothing else,
+# an attention implementation wants the mask and nothing else. An array of
+# structs would need a gather per column at every boundary. `assert_shape`
+# checks the lengths agree, and is called by every constructor here.
+#
+#   ids        the vocabulary id, a row index into the embedding table
+#   tokens     the token string, for reading and for debugging
+#   mask       1 for a real token, 0 for padding
+#   type_ids   0 for the first sequence, 1 for the second in a pair
+#   starts     byte offset into the ORIGINAL source, or -1
+#   ends       byte offset into the ORIGINAL source, exclusive, or -1
+#   special    true for a token the tokeniser added rather than found
+struct Encoding {
+  ids: Arr[I64],
+  tokens: Arr[Str],
+  mask: Arr[I64],
+  type_ids: Arr[I64],
+  starts: Arr[I64],
+  ends: Arr[I64],
+  special: Arr[Bool],
+}
+
+fn new_encoding() -> Encoding {
+  let a: Arr[I64] = []
+  let b: Arr[Str] = []
+  let c: Arr[I64] = []
+  let d: Arr[I64] = []
+  let e: Arr[I64] = []
+  let f: Arr[I64] = []
+  let g: Arr[Bool] = []
+  Encoding { ids: a, tokens: b, mask: c, type_ids: d, starts: e, ends: f, special: g }
+}
+
+fn length(e: Encoding) -> I64 = len(e.ids)
+
+fn push_token(e: Encoding, id: I64, tok: Str, mask: I64, type_id: I64,
+              start: I64, stop: I64, is_special: Bool) {
+  push(e.ids, id)
+  push(e.tokens, tok)
+  push(e.mask, mask)
+  push(e.type_ids, type_id)
+  push(e.starts, start)
+  push(e.ends, stop)
+  push(e.special, is_special)
+}
+
+fn copy_token(dst: Encoding, src: Encoding, i: I64) {
+  push_token(dst, src.ids[i], src.tokens[i], src.mask[i], src.type_ids[i],
+             src.starts[i], src.ends[i], src.special[i])
+}
+
+# The invariant every function here maintains. Cheap, and it catches the one
+# class of bug a parallel-array representation has.
+fn assert_shape(e: Encoding) -> Str {
+  let n: I64 = len(e.ids)
+  if len(e.tokens) != n or len(e.mask) != n or len(e.type_ids) != n
+     or len(e.starts) != n or len(e.ends) != n or len(e.special) != n {
+    return "encoding: the parallel arrays have different lengths, which means a token was appended to some of them and not all"
+  }
+  ""
+}
+
+# ---- the special token registry ---------------------------------------------
+
+# The five tokens every model in practice needs, plus an open list.
+#
+# Named fields for the five rather than only a dictionary, because they are used
+# by name in every function in this file and a lookup by string in a padding
+# loop is both slow and a place to misspell a key. `extra` exists so a caller
+# with a sixth (a language tag, a role marker) can register it and have
+# `is_special_id` answer correctly, which is what truncation and offset
+# reporting need.
+#
+# An id of -1 means the token is not configured. Padding without a `[PAD]` is
+# refused rather than defaulted to id 0, because id 0 is a real token in a
+# vocabulary that did not reserve one, and padding a batch with the word "the"
+# is a bug that trains.
+struct Specials {
+  cls: Str,
+  sep: Str,
+  pad: Str,
+  unk: Str,
+  msk: Str,
+  cls_id: I64,
+  sep_id: I64,
+  pad_id: I64,
+  unk_id: I64,
+  msk_id: I64,
+  extra: Arr[I64],
+}
+
+fn no_specials() -> Specials {
+  let x: Arr[I64] = []
+  Specials { cls: "", sep: "", pad: "", unk: "", msk: "",
+             cls_id: -1, sep_id: -1, pad_id: -1, unk_id: -1, msk_id: -1, extra: x }
+}
+
+# The conventional five. Any of the names may be empty, meaning "this model does
+# not have one", and an empty name gives an id of -1 rather than an error.
+fn bert_specials() -> Arr[Str] {
+  let a: Arr[Str] = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"]
+  a
+}
+
+fn lookup(v: vocab.Vocab, tok: Str) -> I64 {
+  if len(tok) == 0 {
+    return -1
+  }
+  vocab.id_of(v, tok)
+}
+
+# Resolve the names against a vocabulary.
+#
+# Every named token that is not in the vocabulary is an error, and the message
+# names it. The alternative, resolving what it can and leaving the rest at -1,
+# defers the failure to the first batch that needs padding, which is typically
+# in a training loop at three in the morning.
+fn specials_from(v: vocab.Vocab, cls: Str, sep: Str, pad: Str, unk: Str,
+                 msk: Str, out: Specials) -> Str {
+  let names: Arr[Str] = [cls, sep, pad, unk, msk]
+  let i: I64 = 0
+  while i < len(names) {
+    if len(names[i]) > 0 and vocab.id_of(v, names[i]) < 0 {
+      return "encoding.specials_from: '" + names[i] + "' is not in the vocabulary"
+    }
+    i = i + 1
+  }
+  out.cls = cls
+  out.sep = sep
+  out.pad = pad
+  out.unk = unk
+  out.msk = msk
+  out.cls_id = lookup(v, cls)
+  out.sep_id = lookup(v, sep)
+  out.pad_id = lookup(v, pad)
+  out.unk_id = lookup(v, unk)
+  out.msk_id = lookup(v, msk)
+  let x: Arr[I64] = []
+  out.extra = x
+  ""
+}
+
+fn register_extra(sp: Specials, v: vocab.Vocab, tok: Str) -> Str {
+  let id: I64 = vocab.id_of(v, tok)
+  if id < 0 {
+    return "encoding.register_extra: '" + tok + "' is not in the vocabulary"
+  }
+  push(sp.extra, id)
+  ""
+}
+
+fn is_special_id(sp: Specials, id: I64) -> Bool {
+  if id < 0 {
+    return false
+  }
+  if id == sp.cls_id or id == sp.sep_id or id == sp.pad_id
+     or id == sp.unk_id or id == sp.msk_id {
+    return true
+  }
+  let i: I64 = 0
+  while i < len(sp.extra) {
+    if sp.extra[i] == id {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
+# How many tokens the specials will occupy, so truncation can subtract it.
+#
+# `[UNK]` and `[MASK]` are not counted: they replace a real token rather than
+# being added around one. Counting them is the commonest way a max length is
+# quietly exceeded by two.
+fn overhead_single(sp: Specials) -> I64 {
+  let n: I64 = 0
+  if sp.cls_id >= 0 { n = n + 1 }
+  if sp.sep_id >= 0 { n = n + 1 }
+  n
+}
+
+# `[CLS] a [SEP] b [SEP]`: one more separator than the single case.
+fn overhead_pair(sp: Specials) -> I64 {
+  let n: I64 = 0
+  if sp.cls_id >= 0 { n = n + 1 }
+  if sp.sep_id >= 0 { n = n + 2 }
+  n
+}
+
+# ---- from pieces to an encoding ---------------------------------------------
+
+# THE ONLY PLACE A SOURCE OFFSET IS COMPUTED.
+#
+# `p` carries spans in the normalised text; `n` carries the trace back to the
+# source. Every token's source span is `normalize.map_span` of its normalised
+# span, and nothing else in the package calls that function.
+#
+# A piece whose normalised span is empty gets an empty source span. That happens
+# for a model that emits a token with no text behind it, which none of skein's
+# do today, and refusing it here would make adding one a change to this file
+# rather than to the model.
+fn from_pieces(n: normalize.Norm, p: pieces.Pieces, v: vocab.Vocab,
+               type_id: I64) -> Encoding {
+  let e: Encoding = new_encoding()
+  let i: I64 = 0
+  while i < len(p.toks) {
+    let sp: normalize.Span = normalize.map_span(n, p.nstarts[i], p.nends[i])
+    push_token(e, vocab.id_or_unk(v, p.toks[i]), p.toks[i], 1, type_id,
+               sp.start, sp.end, false)
+    i = i + 1
+  }
+  e
+}
+
+# Drop a leading whitespace byte from a token's source span.
+#
+# For byte-level BPE with `space_prefix` on, where the first piece of a word
+# legitimately includes the space before it (see `src/bpe.tw`). A caller
+# rendering a highlight usually wants the word without the space; a caller
+# reconstructing the exact input does not. So this is a function the caller
+# calls and not something the encoder does, and it needs the source string
+# because the space is a byte of the source, not of the token.
+fn trim_leading_space(e: Encoding, source: Str) {
+  let i: I64 = 0
+  while i < length(e) {
+    let a: I64 = e.starts[i]
+    if a >= 0 and a + 1 < e.ends[i] and a < len(source) and text.is_space(source[a]) {
+      e.starts[i] = a + 1
+    }
+    i = i + 1
+  }
+}
+
+# ---- truncation --------------------------------------------------------------
+
+let TRUNC_RIGHT: I64 = 0
+let TRUNC_LEFT: I64 = 1
+let TRUNC_LONGEST_FIRST: I64 = 2
+
+# Keep the first `keep` tokens.
+#
+# Right truncation is the default everywhere and it is a real modelling choice
+# rather than a neutral one: it keeps the beginning of a document, which for a
+# news article is the part that says what the article is about and for a chat
+# transcript is the part that is least relevant. Left truncation exists for the
+# second case.
+fn truncate_right(e: Encoding, keep: I64) -> Encoding {
+  let out: Encoding = new_encoding()
+  let i: I64 = 0
+  while i < length(e) and i < keep {
+    copy_token(out, e, i)
+    i = i + 1
+  }
+  out
+}
+
+fn truncate_left(e: Encoding, keep: I64) -> Encoding {
+  let out: Encoding = new_encoding()
+  let from: I64 = length(e) - keep
+  if from < 0 {
+    from = 0
+  }
+  let i: I64 = from
+  while i < length(e) {
+    copy_token(out, e, i)
+    i = i + 1
+  }
+  out
+}
+
+# Truncate a pair so that the total is `budget`, taking from whichever is
+# currently longer, one token at a time.
+#
+# One at a time, and not proportionally. Proportional truncation cuts a
+# three-token question by the same fraction as a four-hundred-token passage,
+# which destroys the question to save two tokens of the passage. Longest-first
+# converges to equal lengths and only shortens the shorter sequence once the
+# longer one has been cut down to meet it, which is the behaviour anyone pairing
+# a query with a document wants.
+#
+# The budget passed in is already net of the specials' own tokens; see
+# `build_pair`.
+fn truncate_longest_first(a: Encoding, b: Encoding, budget: I64,
+                          out_a: Encoding, out_b: Encoding) {
+  let la: I64 = length(a)
+  let lb: I64 = length(b)
+  while la + lb > budget and la + lb > 0 {
+    if la >= lb {
+      la = la - 1
+    } else {
+      lb = lb - 1
+    }
+  }
+  if la < 0 { la = 0 }
+  if lb < 0 { lb = 0 }
+  let ta: Encoding = truncate_right(a, la)
+  let tb: Encoding = truncate_right(b, lb)
+  out_a.ids = ta.ids
+  out_a.tokens = ta.tokens
+  out_a.mask = ta.mask
+  out_a.type_ids = ta.type_ids
+  out_a.starts = ta.starts
+  out_a.ends = ta.ends
+  out_a.special = ta.special
+  out_b.ids = tb.ids
+  out_b.tokens = tb.tokens
+  out_b.mask = tb.mask
+  out_b.type_ids = tb.type_ids
+  out_b.starts = tb.starts
+  out_b.ends = tb.ends
+  out_b.special = tb.special
+}
+
+# ---- assembling -------------------------------------------------------------
+
+fn add_special(e: Encoding, id: I64, tok: Str, type_id: I64) {
+  if id >= 0 {
+    # Empty span. See the header.
+    push_token(e, id, tok, 1, type_id, -1, -1, true)
+  }
+}
+
+# `[CLS] tokens [SEP]`, truncated to `max_len` including the specials.
+#
+# `max_len` of 0 means no limit. The order is truncate, then wrap: wrapping
+# first and truncating after would cut the trailing `[SEP]` off every sequence
+# that hit the limit, and a model trained with a separator and fed sequences
+# without one degrades in a way that looks like a data problem.
+fn build_single(n: normalize.Norm, p: pieces.Pieces, v: vocab.Vocab,
+                sp: Specials, max_len: I64, strategy: I64) -> Encoding {
+  let body: Encoding = from_pieces(n, p, v, 0)
+  if max_len > 0 {
+    let budget: I64 = max_len - overhead_single(sp)
+    if budget < 0 {
+      budget = 0
+    }
+    if strategy == TRUNC_LEFT {
+      body = truncate_left(body, budget)
+    } else {
+      body = truncate_right(body, budget)
+    }
+  }
+  let out: Encoding = new_encoding()
+  add_special(out, sp.cls_id, sp.cls, 0)
+  let i: I64 = 0
+  while i < length(body) {
+    copy_token(out, body, i)
+    i = i + 1
+  }
+  add_special(out, sp.sep_id, sp.sep, 0)
+  out
+}
+
+# `[CLS] a [SEP] b [SEP]`, with type ids 0 and 1.
+#
+# The second sequence's type id covers its trailing separator, which is the BERT
+# convention: the separator belongs to the segment it closes. Getting this wrong
+# shifts one position of the segment embedding and is invisible in every metric
+# except the one the pair task is measured by.
+fn build_pair(na: normalize.Norm, pa: pieces.Pieces,
+              nb: normalize.Norm, pb: pieces.Pieces,
+              v: vocab.Vocab, sp: Specials, max_len: I64, strategy: I64) -> Encoding {
+  let a: Encoding = from_pieces(na, pa, v, 0)
+  let b: Encoding = from_pieces(nb, pb, v, 1)
+  if max_len > 0 {
+    let budget: I64 = max_len - overhead_pair(sp)
+    if budget < 0 {
+      budget = 0
+    }
+    if strategy == TRUNC_LONGEST_FIRST {
+      let ta: Encoding = new_encoding()
+      let tb: Encoding = new_encoding()
+      truncate_longest_first(a, b, budget, ta, tb)
+      a = ta
+      b = tb
+    } else {
+      # Right or left applied to the pair means applied to the second sequence
+      # first, then the first if that was not enough. The second sequence is the
+      # passage in every pair task skein has been used for, and cutting the
+      # query is a last resort.
+      let keep_b: I64 = budget - length(a)
+      if keep_b < 0 {
+        keep_b = 0
+      }
+      if strategy == TRUNC_LEFT {
+        b = truncate_left(b, keep_b)
+      } else {
+        b = truncate_right(b, keep_b)
+      }
+      let keep_a: I64 = budget - length(b)
+      if keep_a < 0 {
+        keep_a = 0
+      }
+      if strategy == TRUNC_LEFT {
+        a = truncate_left(a, keep_a)
+      } else {
+        a = truncate_right(a, keep_a)
+      }
+    }
+  }
+  let out: Encoding = new_encoding()
+  add_special(out, sp.cls_id, sp.cls, 0)
+  let i: I64 = 0
+  while i < length(a) {
+    copy_token(out, a, i)
+    i = i + 1
+  }
+  add_special(out, sp.sep_id, sp.sep, 0)
+  i = 0
+  while i < length(b) {
+    copy_token(out, b, i)
+    i = i + 1
+  }
+  add_special(out, sp.sep_id, sp.sep, 1)
+  out
+}
+
+# ---- padding -----------------------------------------------------------------
+
+let PAD_RIGHT: I64 = 0
+let PAD_LEFT: I64 = 1
+
+# Pad to `width`, or leave alone if already at or over it.
+#
+# Over it is left alone rather than truncated, because padding and truncation
+# are separate decisions with separate parameters and a function that silently
+# did both would make a max length that was never configured take effect.
+#
+# The padded positions get mask 0, type id 0, an empty span and `special` true.
+# Mask 0 is the only one of those the model sees, and it is the reason padding
+# is safe at all: attention over a masked position contributes nothing, so a
+# batch of unequal lengths gives the same result as running each row alone. A
+# padding token with mask 1 is the single most expensive one-character bug in
+# this area, because the model trains happily and learns to predict `[PAD]`.
+fn pad_to(e: Encoding, width: I64, sp: Specials, side: I64) -> Str {
+  if sp.pad_id < 0 {
+    return "encoding.pad_to: no padding token is configured, and padding with an arbitrary id would insert a real word"
+  }
+  let need: I64 = width - length(e)
+  if need <= 0 {
+    return ""
+  }
+  if side == PAD_LEFT {
+    let out: Encoding = new_encoding()
+    let k: I64 = 0
+    while k < need {
+      push_token(out, sp.pad_id, sp.pad, 0, 0, -1, -1, true)
+      k = k + 1
+    }
+    let i: I64 = 0
+    while i < length(e) {
+      copy_token(out, e, i)
+      i = i + 1
+    }
+    e.ids = out.ids
+    e.tokens = out.tokens
+    e.mask = out.mask
+    e.type_ids = out.type_ids
+    e.starts = out.starts
+    e.ends = out.ends
+    e.special = out.special
+    return ""
+  }
+  let k: I64 = 0
+  while k < need {
+    push_token(e, sp.pad_id, sp.pad, 0, 0, -1, -1, true)
+    k = k + 1
+  }
+  ""
+}
+
+# ---- batches -----------------------------------------------------------------
+
+struct Batch {
+  items: Arr[Encoding],
+}
+
+fn new_batch() -> Batch {
+  let a: Arr[Encoding] = []
+  Batch { items: a }
+}
+
+fn batch_add(b: Batch, e: Encoding) {
+  push(b.items, e)
+}
+
+fn batch_size(b: Batch) -> I64 = len(b.items)
+
+fn longest(b: Batch) -> I64 {
+  let m: I64 = 0
+  let i: I64 = 0
+  while i < len(b.items) {
+    if length(b.items[i]) > m {
+      m = length(b.items[i])
+    }
+    i = i + 1
+  }
+  m
+}
+
+# Pad every row to the longest row in the batch.
+#
+# The point of padding to the longest rather than to a fixed model maximum: a
+# batch of 32 tweets padded to 512 is 15 times the arithmetic for the same
+# result. Bucketing by length before batching makes this much better still, and
+# that is `src/sequence.tw`.
+fn pad_batch_longest(b: Batch, sp: Specials, side: I64) -> Str {
+  let w: I64 = longest(b)
+  let i: I64 = 0
+  while i < len(b.items) {
+    let err: Str = pad_to(b.items[i], w, sp, side)
+    if len(err) > 0 {
+      return err
+    }
+    i = i + 1
+  }
+  ""
+}
+
+fn pad_batch_fixed(b: Batch, width: I64, sp: Specials, side: I64) -> Str {
+  let i: I64 = 0
+  while i < len(b.items) {
+    let err: Str = pad_to(b.items[i], width, sp, side)
+    if len(err) > 0 {
+      return err
+    }
+    i = i + 1
+  }
+  ""
+}
+
+# How many padding positions the batch carries, and how many real ones.
+#
+# A ratio worth printing once at the start of a run. Anything above about 30%
+# means the batching is wrong, not the model, and it is the cheapest speedup
+# available in most pipelines.
+fn pad_waste(b: Batch) -> I64 {
+  let waste: I64 = 0
+  let i: I64 = 0
+  while i < len(b.items) {
+    let e: Encoding = b.items[i]
+    let k: I64 = 0
+    while k < length(e) {
+      if e.mask[k] == 0 {
+        waste = waste + 1
+      }
+      k = k + 1
+    }
+    i = i + 1
+  }
+  waste
+}
+
+# ---- reading back ------------------------------------------------------------
+
+# The source substring a token came from, or the empty string for a token with
+# no source.
+#
+# This is what the offset map is for, and it is one line, which is the point:
+# every consumer of an offset should be able to write this and get it right.
+fn source_text(e: Encoding, i: I64, source: Str) -> Str {
+  if i < 0 or i >= length(e) or e.starts[i] < 0 {
+    return ""
+  }
+  text.slice(source, e.starts[i], e.ends[i])
+}
+
+# The source span covering tokens `a` through `b`, ignoring specials.
+#
+# Used to answer "which characters does this predicted span correspond to",
+# which is the question a span-extraction model's output poses. Specials are
+# skipped rather than treated as zero-width at 0, which is the whole reason
+# their span is -1.
+fn source_span(e: Encoding, a: I64, b: I64) -> normalize.Span {
+  let lo: I64 = -1
+  let hi: I64 = -1
+  let i: I64 = a
+  while i <= b and i < length(e) {
+    if i >= 0 and e.starts[i] >= 0 {
+      if lo < 0 or e.starts[i] < lo {
+        lo = e.starts[i]
+      }
+      if e.ends[i] > hi {
+        hi = e.ends[i]
+      }
+    }
+    i = i + 1
+  }
+  if lo < 0 {
+    return normalize.empty_span()
+  }
+  normalize.span(lo, hi)
+}

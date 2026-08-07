@@ -1,0 +1,84 @@
+mode systems
+
+import "harness.tw" as t
+import "../src/pretok.tw" as pt
+
+fn whitespace_splitting_records_the_span_of_every_run() {
+  let p: pt.PreTok = pt.whitespace("the  cat sat")
+  t.equal_i64("three pre-tokens", pt.count(p), 3)
+  t.equal_i64("the starts at 0", p.starts[0], 0)
+  t.equal_i64("the ends at 3", p.ends[0], 3)
+  t.equal_i64("cat starts at 5", p.starts[1], 5)
+  t.equal_i64("sat starts at 9", p.starts[2], 9)
+}
+
+fn only_the_first_pre_token_of_a_line_has_no_space_before_it() {
+  let p: pt.PreTok = pt.whitespace("a b c")
+  t.check("the first had no space before it", not p.space_before[0])
+  t.check("the second did", p.space_before[1])
+  t.check("the third did", p.space_before[2])
+}
+
+fn leading_whitespace_marks_the_first_pre_token() {
+  let p: pt.PreTok = pt.whitespace("  a")
+  t.equal_i64("one pre-token", pt.count(p), 1)
+  t.equal_i64("it starts after the spaces", p.starts[0], 2)
+  t.check("and it knows a space preceded it", p.space_before[0])
+}
+
+fn punctuation_splitting_gives_each_mark_its_own_span() {
+  let p: pt.PreTok = pt.word_punct("hello, world!")
+  t.equal_i64("four pre-tokens", pt.count(p), 4)
+  t.equal_i64("hello spans 0 to 5", p.ends[0], 5)
+  t.equal_i64("the comma is one byte at 5", p.starts[1], 5)
+  t.equal_i64("and ends at 6", p.ends[1], 6)
+  t.equal_i64("world starts at 7", p.starts[2], 7)
+  t.equal_i64("the bang is at 12", p.starts[3], 12)
+}
+
+fn whitespace_splitting_keeps_punctuation_attached() {
+  let p: pt.PreTok = pt.whitespace("hello, world!")
+  t.equal_i64("two pre-tokens", pt.count(p), 2)
+  t.equal_i64("the comma stayed with hello", p.ends[0], 6)
+}
+
+# The honest limitation, tested so that it is a decision and not a surprise. A
+# typographic quote is above 127, so the ASCII punctuation test does not fire.
+fn a_non_ascii_punctuation_mark_is_not_split_out() {
+  let p: pt.PreTok = pt.word_punct("a" + chr(226) + chr(128) + chr(153) + "b")
+  t.equal_i64("the whole thing stayed one pre-token", pt.count(p), 1)
+  t.equal_i64("spanning all five bytes", p.ends[0], 5)
+}
+
+fn a_multibyte_character_is_never_split_by_the_punctuation_rule() {
+  # 0x80 and 0x99 are continuation bytes and are above 126, so `is_punct` is
+  # false for them. This is the property that makes the ASCII rule safe.
+  t.check("a continuation byte is not punctuation", not pt.is_punct(153))
+  t.check("nor is a lead byte", not pt.is_punct(226))
+  t.check("a comma is", pt.is_punct(44))
+  t.check("a letter is not", not pt.is_punct(97))
+  t.check("a space is not, it is handled separately", not pt.is_punct(32))
+}
+
+fn the_whole_string_is_one_pre_token() {
+  let p: pt.PreTok = pt.whole("a b")
+  t.equal_i64("one pre-token", pt.count(p), 1)
+  t.equal_i64("covering everything", p.ends[0], 3)
+}
+
+fn an_empty_string_produces_no_pre_tokens() {
+  t.equal_i64("whitespace on empty", pt.count(pt.whitespace("")), 0)
+  t.equal_i64("word_punct on empty", pt.count(pt.word_punct("")), 0)
+  t.equal_i64("whole on empty", pt.count(pt.whole("")), 0)
+}
+
+whitespace_splitting_records_the_span_of_every_run()
+only_the_first_pre_token_of_a_line_has_no_space_before_it()
+leading_whitespace_marks_the_first_pre_token()
+punctuation_splitting_gives_each_mark_its_own_span()
+whitespace_splitting_keeps_punctuation_attached()
+a_non_ascii_punctuation_mark_is_not_split_out()
+a_multibyte_character_is_never_split_by_the_punctuation_rule()
+the_whole_string_is_one_pre_token()
+an_empty_string_produces_no_pre_tokens()
+t.report("skein pretok")

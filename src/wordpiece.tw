@@ -1,0 +1,156 @@
+mode systems
+
+# wordpiece.tw: greedy longest-match-first, with a continuation prefix.
+#
+# WHAT IT IS
+#
+# For each pre-token, take the longest prefix that is in the vocabulary, emit
+# it, and repeat on the rest with `##` prepended to every lookup after the
+# first. If at any point no prefix of the remainder is in the vocabulary, throw
+# away the whole word's pieces and emit one unknown token for the entire word.
+#
+# WHY LONGEST-MATCH IS CORRECT HERE AND WRONG FOR BPE
+#
+# `src/bpe.tw` argues at length that encoding must replay merges by rank rather
+# than match longest-first. That is not a contradiction with this file: the two
+# models learn different artefacts. BPE learns an *ordered* list of merges and
+# the order is the model, so ignoring it produces splits the model never saw.
+# WordPiece learns an unordered vocabulary and *defines* its encoding as the
+# greedy longest match. The greedy scan is not an approximation of WordPiece's
+# training objective, it is the algorithm the training objective was defined
+# against. Applying rank-order to WordPiece would be as wrong as the reverse.
+#
+# WHY THE FALLBACK IS THE WHOLE WORD
+#
+# Failing mid-word and emitting `[UNK]` only for the unmatched tail would be a
+# smaller loss of information and it is not what WordPiece does. The definition
+# is all or nothing per word, and matching the definition matters more than
+# being marginally better, because a tokeniser that is 1% better than the one a
+# checkpoint was trained with is 100% incompatible with it.
+#
+# The offset consequence is stated rather than hidden: the `[UNK]` token gets
+# the span of the entire word, not an empty span. It is an unknown token, but it
+# is an unknown token that came from somewhere, and pointing at where is the
+# entire value of an offset map. Only tokens that came from nowhere, the
+# specials in `src/encoding.tw`, get an empty span.
+
+import "std/text" as text
+import "../src/vocab.tw" as vocab
+import "../src/pieces.tw" as pieces
+import "../src/pretok.tw" as pretok
+
+# `max_chars` bounds the word length that is attempted. A word longer than this
+# goes straight to `[UNK]` without being scanned.
+#
+# It exists because the scan is quadratic in the word's character count, and a
+# 40,000-character run of base64 in a log file is a real input that turns a
+# tokeniser into a hang. 100 is the conventional value and covers every real
+# word in every language written with spaces.
+struct WordPiece {
+  v: vocab.Vocab,
+  cont: Str,
+  unk: Str,
+  max_chars: I64,
+}
+
+fn new_wordpiece(v: vocab.Vocab, unk: Str) -> WordPiece =
+  WordPiece { v: v, cont: "##", unk: unk, max_chars: 100 }
+
+# Encode one word given as a byte range of `s`.
+#
+# The candidate ends come from `text.char_starts` over the word, so a piece
+# boundary is always a character boundary. Slicing at an arbitrary byte would
+# produce a token that is half a character: it would never be in the vocabulary,
+# so it would not be emitted, but it would be *looked up*, and a vocabulary that
+# happened to contain a lead-byte-only entry would then match it. That is a
+# corruption you cannot find by reading the output, because the output is bytes
+# that print as a replacement character.
+fn encode_word(m: WordPiece, s: Str, a: I64, b: I64, out: pieces.Pieces) {
+  let w: Str = text.slice(s, a, b)
+  let starts: Arr[I64] = text.char_starts(w)
+  let nchars: I64 = len(starts) - 1
+  if nchars == 0 {
+    return
+  }
+  if nchars > m.max_chars {
+    pieces.add(out, m.unk, a, b)
+    return
+  }
+
+  let got: pieces.Pieces = pieces.new_pieces()
+  let ci: I64 = 0
+  while ci < nchars {
+    # Longest first: start at the end of the word and shorten.
+    let cj: I64 = nchars
+    let hit: I64 = -1
+    while cj > ci and hit < 0 {
+      let piece: Str = text.slice(w, starts[ci], starts[cj])
+      if ci > 0 {
+        piece = m.cont + piece
+      }
+      if vocab.contains(m.v, piece) {
+        hit = cj
+        pieces.add(got, piece, a + starts[ci], a + starts[cj])
+      }
+      cj = cj - 1
+    }
+    if hit < 0 {
+      # No prefix of the remainder is in the vocabulary. All or nothing.
+      pieces.add(out, m.unk, a, b)
+      return
+    }
+    ci = hit
+  }
+  pieces.extend(out, got)
+}
+
+fn encode(m: WordPiece, s: Str, p: pretok.PreTok) -> pieces.Pieces {
+  let out: pieces.Pieces = pieces.new_pieces()
+  let i: I64 = 0
+  while i < pretok.count(p) {
+    encode_word(m, s, p.starts[i], p.ends[i], out)
+    i = i + 1
+  }
+  out
+}
+
+# Ids for a `Pieces`, using the vocabulary's unknown id for anything absent.
+#
+# Absent should be impossible: `encode_word` only emits pieces it found, or the
+# unknown token itself. It is handled anyway because the vocabulary is a
+# parameter and a caller can hand in one whose `unk` string is not the one this
+# model was built with, and a silent -1 id would then reach `std/nn`'s `gather`
+# as a negative row index.
+fn ids(m: WordPiece, p: pieces.Pieces) -> Arr[I64] {
+  let out: Arr[I64] = []
+  let i: I64 = 0
+  while i < len(p.toks) {
+    push(out, vocab.id_or_unk(m.v, p.toks[i]))
+    i = i + 1
+  }
+  out
+}
+
+# Undo the continuation prefix, joining a word back together.
+#
+# Not a general inverse of `encode`: it cannot recover which words were adjacent
+# without a space, because that information is in the offsets and not in the
+# tokens. This is for reading test output and for a decoder that is willing to
+# put a space between words, which is what every WordPiece decoder does and is
+# why WordPiece models are not used where exact reconstruction matters.
+fn detokenize(m: WordPiece, toks: Arr[Str]) -> Str {
+  let out: Str = ""
+  let i: I64 = 0
+  while i < len(toks) {
+    if text.starts_with(toks[i], m.cont) {
+      out = out + text.trim_prefix(toks[i], m.cont)
+    } else {
+      if i > 0 {
+        out = out + " "
+      }
+      out = out + toks[i]
+    }
+    i = i + 1
+  }
+  out
+}

@@ -1,0 +1,444 @@
+mode systems
+
+# normalize.tw: text normalisation that never loses the way back.
+#
+# WHY A TRACE AND NOT A STRING
+#
+# Every tokeniser normalises before it splits, and every tokeniser is then asked
+# where a token came from. Highlighting an answer in a document, aligning a
+# label to a span, showing a user which words the model attended to: all of them
+# need a byte range in the text the user gave you, not in the lowercased,
+# space-collapsed, accent-stripped string the tokeniser worked on. Those two
+# strings do not have the same length and their bytes do not line up, so an
+# offset taken from one and reported against the other is wrong by a drifting
+# amount that is zero on the ASCII test data and non-zero on real input.
+#
+# So normalisation here does not return a `Str`. It returns a `Norm`, which is
+# the normalised bytes plus, for every one of those bytes, the byte range of the
+# original that produced it. Steps compose: each step reads a `Norm` and writes
+# a `Norm` whose trace still points at the original, never at its own input.
+# After ten steps `map_span` is still a single array lookup.
+#
+# The cost is two I64 per normalised byte. That is real, and it is the price of
+# the only property anyone actually wants from a normaliser.
+#
+# WHAT UNICODE THIS CAN AND CANNOT DO, PLAINLY
+#
+# `Str` in twill is bytes (docs/self-hosting.md section 1.2: "there is no
+# character type, no rune, and no unicode normalization anywhere"), and
+# `std/text.tw` gives UTF-8 decoding, `char_starts`, `char_size` and
+# `char_code`, and nothing else. There is no Unicode character database in the
+# language or in this package.
+#
+# Therefore:
+#
+#   CAN DO, correctly and completely
+#     - UTF-8-aware boundaries, so no step ever cuts a character in half.
+#     - ASCII case folding. Bytes above 127 are untouched, which is safe rather
+#       than partial: no byte of a multi-byte sequence lies in a..z or A..Z.
+#     - Whitespace collapsing and trimming over the six ASCII whitespace bytes.
+#     - Control-character stripping over C0 and DEL, and over the C1 range.
+#     - Accent folding over the Latin-1 Supplement letters, U+00C0 to U+00FF.
+#       That is a 64-entry table, not a database, and it is written out below.
+#
+#   CANNOT DO, and does not pretend to
+#     - NFC or NFD. Canonical composition needs the canonical decomposition
+#       mappings, the canonical combining classes and the composition
+#       exclusions, which together are tens of thousands of entries and are a
+#       data file, not a function. `nfc` in `NormSpec` is refused with a message
+#       rather than approximated, because a normaliser that silently does 3% of
+#       NFC is worse than one that does none: the failures are exactly the
+#       inputs nobody has in their test corpus.
+#     - Case folding outside ASCII. Turkish dotless i, Greek final sigma and
+#       German sharp s all make this locale- and context-dependent and not
+#       length-preserving. `std/text.tw` says the same thing at more length.
+#     - Accents outside Latin-1. U+0100 upward, and combining marks in U+0300,
+#       need the decomposition table this package does not have.
+#
+# `docs/needs.md` entry 1 records the missing table, and names this file and
+# `apply` as what needs it.
+
+import "std/text" as text
+
+# ---- the traced string -----------------------------------------------------
+
+# `text` is the normalised bytes. `starts[i]` and `ends[i]` are the half-open
+# byte range of the ORIGINAL string that produced normalised byte `i`.
+#
+# A range rather than a single offset, because normalisation is not a bijection
+# in either direction. Collapsing a run of five whitespace bytes to one space
+# gives one output byte covering five input bytes; expanding one sharp s to two
+# ASCII bytes gives two output bytes covering the same two input bytes. Storing
+# only a start offset makes the first case report a one-byte span where the user
+# sees five characters of whitespace, and that is visible on screen.
+struct Norm {
+  text: Str,
+  starts: Arr[I64],
+  ends: Arr[I64],
+  source: Str,
+}
+
+# A byte range. Named rather than returned as a pair because the subset has no
+# tuples; `docs/needs.md` entry 8.
+struct Span {
+  start: I64,
+  end: I64,
+}
+
+fn span(a: I64, b: I64) -> Span = Span { start: a, end: b }
+
+# The empty span, which is what a special token gets. Deliberately -1 and not
+# 0, so that a caller that forgets to check `is_empty` produces a visibly
+# nonsense offset rather than one that points at the first byte of the document.
+# See the argument in `src/encoding.tw`.
+fn empty_span() -> Span = Span { start: -1, end: -1 }
+
+fn span_is_empty(s: Span) -> Bool = s.start < 0
+
+# The identity normalisation: every byte maps to itself. This is the seed every
+# pipeline starts from, and it is also the honest answer for a caller who wants
+# offsets but no normalisation at all.
+fn identity(s: Str) -> Norm {
+  let st: Arr[I64] = []
+  let en: Arr[I64] = []
+  let i: I64 = 0
+  while i < len(s) {
+    push(st, i)
+    push(en, i + 1)
+    i = i + 1
+  }
+  Norm { text: s, starts: st, ends: en, source: s }
+}
+
+# The original byte range that produced normalised bytes [a, b).
+#
+# The whole point of the file. An empty normalised range gives an empty span
+# rather than a zero-width span at `a`, because a token with no bytes is not the
+# same as a token positioned at a byte.
+fn map_span(n: Norm, a: I64, b: I64) -> Span {
+  if a >= b or a < 0 or b > len(n.text) {
+    return empty_span()
+  }
+  span(n.starts[a], n.ends[b - 1])
+}
+
+# The normalised length in bytes.
+fn norm_len(n: Norm) -> I64 = len(n.text)
+
+# ---- the spec --------------------------------------------------------------
+
+# What to do, in the order the fields are listed, which is also the order
+# `apply` runs them and the only order that is correct:
+#
+#   strip_control before everything, so a control byte cannot survive into a
+#   collapsed run and be mistaken for content.
+#
+#   fold_latin1 before lower_ascii, because folding U+00C0 gives "A" and the
+#   caller who asked for lowercase wants "a". The other order leaves capital
+#   letters in a lowercased string, which then fail an exact vocabulary lookup.
+#
+#   collapse_space before trim_ends, so trimming has one byte to remove at each
+#   end rather than a run.
+#
+# `nfc` exists as a field so that a caller can ask and be told no. It is not
+# quietly absent.
+struct NormSpec {
+  strip_control: Bool,
+  fold_latin1: Bool,
+  lower_ascii: Bool,
+  collapse_space: Bool,
+  trim_ends: Bool,
+  nfc: Bool,
+}
+
+fn spec_none() -> NormSpec =
+  NormSpec { strip_control: false, fold_latin1: false, lower_ascii: false,
+             collapse_space: false, trim_ends: false, nfc: false }
+
+# The spec most callers want: everything this file can honestly do.
+fn spec_default() -> NormSpec =
+  NormSpec { strip_control: true, fold_latin1: false, lower_ascii: true,
+             collapse_space: true, trim_ends: true, nfc: false }
+
+# The spec for a cased model. Casing carries information for named entities, so
+# a model trained cased must not be fed a lowercased string.
+fn spec_cased() -> NormSpec =
+  NormSpec { strip_control: true, fold_latin1: false, lower_ascii: false,
+             collapse_space: true, trim_ends: true, nfc: false }
+
+# Run the spec over `s`.
+#
+# Returns the error string, empty on success, and writes the result through
+# `out`. This is the house convention (`src/encoding.tw` and spool both use it)
+# because the subset has neither `Res[T, E]` nor multiple returns;
+# `docs/needs.md` entry 8.
+#
+# `out` is a struct and structs have reference semantics, so writing its fields
+# is visible to the caller. That is the same mechanism `apply_into` below uses.
+fn apply(spec: NormSpec, s: Str, out: Norm) -> Str {
+  if spec.nfc {
+    return "normalize.apply: NFC is not implemented and is not approximated; see the header of src/normalize.tw and docs/needs.md entry 1"
+  }
+  let n: Norm = identity(s)
+  if spec.strip_control {
+    n = strip_control(n)
+  }
+  if spec.fold_latin1 {
+    n = fold_latin1(n)
+  }
+  if spec.lower_ascii {
+    n = lower_ascii(n)
+  }
+  if spec.collapse_space {
+    n = collapse_space(n)
+  }
+  if spec.trim_ends {
+    n = trim_ends(n)
+  }
+  out.text = n.text
+  out.starts = n.starts
+  out.ends = n.ends
+  out.source = n.source
+  ""
+}
+
+# An empty `Norm` to pass to `apply` as its out-parameter.
+fn blank() -> Norm {
+  let st: Arr[I64] = []
+  let en: Arr[I64] = []
+  Norm { text: "", starts: st, ends: en, source: "" }
+}
+
+# ---- the steps -------------------------------------------------------------
+#
+# Each step is a full pass that rebuilds the byte buffer and the two trace
+# arrays together. They are written out rather than expressed as one
+# table-driven pass because each has a different arity between input and output
+# bytes (drop, one-to-one, one-to-many, many-to-one) and a shared driver would
+# have to take all four cases anyway.
+
+# A byte is a control character if it is C0 (0..31) or DEL (127), except the
+# three whitespace bytes that carry structure. Those survive here and are dealt
+# with by `collapse_space`, which is the step that knows what to replace them
+# with.
+fn is_control(c: I64) -> Bool {
+  if c == text.TAB or c == text.LF or c == text.CR {
+    return false
+  }
+  c < 32 or c == 127
+}
+
+# Drop control characters, and the C1 range, keeping the trace aligned.
+#
+# C1 (U+0080..U+009F) is two bytes in UTF-8, 0xC2 followed by 0x80..0x9F, and it
+# is stripped as a unit. It matters because C1 bytes appear constantly in text
+# that was decoded as Latin-1 and re-encoded, they are invisible in every
+# editor, and a vocabulary lookup on a word carrying one silently misses.
+fn strip_control(n: Norm) -> Norm {
+  let b: Bytes = bytes_new()
+  let st: Arr[I64] = []
+  let en: Arr[I64] = []
+  let i: I64 = 0
+  let src: Str = n.text
+  while i < len(src) {
+    let c: I64 = src[i]
+    if c == 194 and i + 1 < len(src) and src[i + 1] >= 128 and src[i + 1] <= 159 {
+      i = i + 2
+    } else {
+      if is_control(c) {
+        i = i + 1
+      } else {
+        bytes_push(b, c)
+        push(st, n.starts[i])
+        push(en, n.ends[i])
+        i = i + 1
+      }
+    }
+  }
+  Norm { text: bytes_to_str(b), starts: st, ends: en, source: n.source }
+}
+
+# ASCII case folding. See the header for why this stops at 127.
+fn lower_ascii(n: Norm) -> Norm {
+  let b: Bytes = bytes_new()
+  let st: Arr[I64] = []
+  let en: Arr[I64] = []
+  let i: I64 = 0
+  while i < len(n.text) {
+    let c: I64 = n.text[i]
+    if text.is_upper(c) {
+      c = c + 32
+    }
+    bytes_push(b, c)
+    push(st, n.starts[i])
+    push(en, n.ends[i])
+    i = i + 1
+  }
+  Norm { text: bytes_to_str(b), starts: st, ends: en, source: n.source }
+}
+
+# The ASCII replacement for a code point in U+00C0..U+00FF, or the empty string
+# for a code point that has none.
+#
+# This is the whole "accent handling" claim and it is deliberately small enough
+# to read in one screen. It covers the Latin-1 Supplement letters and no more.
+# Three of them are not length-preserving (AE, TH, ss) and that is exactly why
+# the trace stores a range per output byte rather than an offset.
+#
+# The two non-letters in the block, U+00D7 multiplication sign and U+00F7
+# division sign, are left alone: they are mathematics, not accented letters, and
+# folding them to anything would be an invention.
+fn latin1_fold(code: I64) -> Str {
+  if code >= 192 and code <= 197 { return "A" }
+  if code == 198 { return "AE" }
+  if code == 199 { return "C" }
+  if code >= 200 and code <= 203 { return "E" }
+  if code >= 204 and code <= 207 { return "I" }
+  if code == 208 { return "D" }
+  if code == 209 { return "N" }
+  if code >= 210 and code <= 214 { return "O" }
+  if code == 216 { return "O" }
+  if code >= 217 and code <= 220 { return "U" }
+  if code == 221 { return "Y" }
+  if code == 222 { return "TH" }
+  if code == 223 { return "ss" }
+  if code >= 224 and code <= 229 { return "a" }
+  if code == 230 { return "ae" }
+  if code == 231 { return "c" }
+  if code >= 232 and code <= 235 { return "e" }
+  if code >= 236 and code <= 239 { return "i" }
+  if code == 240 { return "d" }
+  if code == 241 { return "n" }
+  if code >= 242 and code <= 246 { return "o" }
+  if code == 248 { return "o" }
+  if code >= 249 and code <= 252 { return "u" }
+  if code == 253 { return "y" }
+  if code == 254 { return "th" }
+  if code == 255 { return "y" }
+  ""
+}
+
+# Fold Latin-1 accented letters to their ASCII base, leaving everything else
+# byte for byte.
+#
+# Iterates in whole UTF-8 sequences using `text.char_size`, so a three-byte
+# character is copied as three bytes and never inspected as three separate
+# candidates. That is the property that makes this safe to run over arbitrary
+# input rather than only over Latin text.
+fn fold_latin1(n: Norm) -> Norm {
+  let b: Bytes = bytes_new()
+  let st: Arr[I64] = []
+  let en: Arr[I64] = []
+  let i: I64 = 0
+  let s: Str = n.text
+  while i < len(s) {
+    let w: I64 = text.char_size(s[i])
+    if i + w > len(s) {
+      w = 1
+    }
+    let rep: Str = ""
+    if w == 2 {
+      rep = latin1_fold(text.char_code(s, i))
+    }
+    if len(rep) > 0 {
+      # Every replacement byte carries the span of the whole original
+      # character, which is the honest answer: no byte of "AE" corresponds to
+      # half of U+00C6.
+      let lo: I64 = n.starts[i]
+      let hi: I64 = n.ends[i + w - 1]
+      let k: I64 = 0
+      while k < len(rep) {
+        bytes_push(b, rep[k])
+        push(st, lo)
+        push(en, hi)
+        k = k + 1
+      }
+    } else {
+      let k: I64 = 0
+      while k < w {
+        bytes_push(b, s[i + k])
+        push(st, n.starts[i + k])
+        push(en, n.ends[i + k])
+        k = k + 1
+      }
+    }
+    i = i + w
+  }
+  Norm { text: bytes_to_str(b), starts: st, ends: en, source: n.source }
+}
+
+# Every run of ASCII whitespace becomes one space byte, spanning the whole run.
+#
+# The span is the whole run and not its first byte. A user who selects the
+# collapsed space in a rendered view and asks what it was expects the newline
+# and the eight spaces of indentation it replaced, and a one-byte answer there
+# is a highlight that visibly misses.
+fn collapse_space(n: Norm) -> Norm {
+  let b: Bytes = bytes_new()
+  let st: Arr[I64] = []
+  let en: Arr[I64] = []
+  let i: I64 = 0
+  let s: Str = n.text
+  while i < len(s) {
+    if text.is_space(s[i]) {
+      let lo: I64 = n.starts[i]
+      let hi: I64 = n.ends[i]
+      while i < len(s) and text.is_space(s[i]) {
+        hi = n.ends[i]
+        i = i + 1
+      }
+      bytes_push(b, text.SPACE)
+      push(st, lo)
+      push(en, hi)
+    } else {
+      bytes_push(b, s[i])
+      push(st, n.starts[i])
+      push(en, n.ends[i])
+      i = i + 1
+    }
+  }
+  Norm { text: bytes_to_str(b), starts: st, ends: en, source: n.source }
+}
+
+# Whitespace removed from both ends, trace sliced with it.
+fn trim_ends(n: Norm) -> Norm {
+  let a: I64 = 0
+  let z: I64 = len(n.text)
+  while a < z and text.is_space(n.text[a]) {
+    a = a + 1
+  }
+  while z > a and text.is_space(n.text[z - 1]) {
+    z = z - 1
+  }
+  let st: Arr[I64] = []
+  let en: Arr[I64] = []
+  let i: I64 = a
+  while i < z {
+    push(st, n.starts[i])
+    push(en, n.ends[i])
+    i = i + 1
+  }
+  Norm { text: text.slice(n.text, a, z), starts: st, ends: en, source: n.source }
+}
+
+# ---- boundaries ------------------------------------------------------------
+
+# True when byte `i` of the normalised text starts a UTF-8 character.
+#
+# Used by every model that slices the normalised text: a piece boundary that is
+# not a character boundary produces a token that is not valid UTF-8, which then
+# prints as replacement characters in whatever displays it. Checking is one
+# byte test, so nothing here has an excuse.
+fn is_char_boundary(n: Norm, i: I64) -> Bool {
+  if i <= 0 or i >= len(n.text) {
+    return true
+  }
+  and(n.text[i], 192) != 128
+}
+
+# The byte offsets at which characters start, plus the terminating length.
+# A thin wrapper over `text.char_starts` so callers in this package do not have
+# to reach past the `Norm` for it, and so the sentinel discipline is stated in
+# one place: the last entry is `len`, which is what makes character k's bytes
+# exactly `starts[k]` to `starts[k+1]`.
+fn char_boundaries(n: Norm) -> Arr[I64] = text.char_starts(n.text)

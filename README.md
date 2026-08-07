@@ -223,9 +223,9 @@ The cost is two `I64` per normalised byte. That is the price of the only
 property anyone wants from a normaliser.
 
 **What is honest over twill's byte-only `Str`.** `std/text.tw` gives UTF-8
-decoding (`char_starts`, `char_size`, `char_code`) and
-there is no Unicode character database
-anywhere in the language. So skein does, correctly and
+decoding (`char_starts`, `char_size`, `char_code`), and
+there is no Unicode character database anywhere in the language.
+So skein does the following, correctly and
 completely: UTF-8-aware boundaries so no step ever cuts a character in half;
 ASCII case folding, which cannot corrupt UTF-8 because no byte of a multi-byte
 sequence lies in `a..z` or `A..Z`; whitespace collapsing and trimming;

@@ -66,6 +66,24 @@ import "../src/pieces.tw" as pieces
 #   starts     byte offset into the ORIGINAL source, or -1
 #   ends       byte offset into the ORIGINAL source, exclusive, or -1
 #   special    true for a token the tokeniser added rather than found
+#
+# The dtype each column becomes at the tensor boundary, using the language's
+# dtype set (raster docs/dtypes.md), because the consumer builds the tensor and
+# building it at the right width beats building it at f64 and narrowing after:
+#
+#   ids, type_ids   i32. They are row indices into an embedding table and into a
+#                   two-row type table, and an index dtype is i32 in twill the
+#                   same as argmax's output is. A vocabulary far larger than any
+#                   real one still fits 2^31, so i32 is not a constraint.
+#   mask            bool. It is a per-token 1-or-0 that an attention layer reads
+#                   for truthiness, exactly the dtype every comparison produces.
+#   starts, ends    i32 offsets, for a consumer that tensorises them at all;
+#                   most read them as a plain array for span mapping and never do.
+#
+# These are held as Arr[I64] here because the systems subset has no narrower
+# array yet (raster NEEDS-111); the dtype is the width the model should build,
+# not the width skein stores. A warp pipeline over token ids declares it with
+# `pipe.astype(p, dt.DT_I32)`, and the mask column with DT_BOOL.
 struct Encoding {
   ids: Arr[I64],
   tokens: Arr[Str],

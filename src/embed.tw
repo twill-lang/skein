@@ -140,6 +140,15 @@ fn table(vocab_size: I64, dim: I64) = nn.embedding_params(vocab_size, dim)
 # The result is `std/nn`'s, unchanged: skein does not wrap it, does not name it
 # and does not own it.
 #
+# It is dtype-transparent, which matters now that the language has narrow dtypes.
+# The ids are i32 indices and `gather` selects rows without arithmetic, so the
+# output takes the table's own dtype: a bf16 embedding table returns bf16 rows,
+# and skein does nothing to widen them. That is exactly the behaviour a
+# mixed-precision model needs at its first layer, where widening the embedding to
+# f64 would undo the reason the table was narrow (raster docs/dtypes.md, and the
+# widening warning in the checker). skein narrows nothing and widens nothing; the
+# table's dtype is the model's decision and it flows straight through.
+#
 # The check is a separate call rather than folded in here, because this function
 # has to return a tensor and the house error convention returns a `Str`, and a
 # function cannot do both (`docs/needs.md` entry 8). So the contract is: call

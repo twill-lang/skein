@@ -310,3 +310,15 @@ and is fine, and it needs a way to spell that copy, which does not exist. This
 is the single point where skein touches the numeric half of the language and it
 is the one interface in the package that has not been checked against a real
 implementation of anything.
+
+Since this was written, the numeric half grew narrow dtypes (raster
+`docs/dtypes.md`), which sharpens what the conversion should produce rather than
+changing what is missing. The id and type-id columns are row indices and want
+i32, the dtype twill gives every index; the mask is a per-token 1-or-0 and wants
+bool. So the conversion this entry asks for is specifically `Arr[I64]` to an i32
+(or bool) tensor, not to f64, and `src/encoding.tw` now documents the dtype of
+each column at the boundary so a consumer builds them narrow. The embedding
+output is a separate matter and needs nothing: `embed` is dtype-transparent, the
+table's dtype flows straight through gather, so a bf16 table returns bf16 rows
+with no widening. The gap is still the one interface unchecked against a real
+tensor implementation; it is just better specified now.

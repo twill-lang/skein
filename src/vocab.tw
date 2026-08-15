@@ -428,6 +428,18 @@ fn save(v: Vocab) -> Str {
 # a corruption in one is almost always a truncated write or a merge conflict
 # marker, both of which are found instantly given a line number and not at all
 # given "bad vocabulary file".
+# `i64_of_str` answers with an Opt, because a line in a vocabulary file is not
+# guaranteed to hold a number. These three call sites bound the value straight
+# to an `I64` and then compared it, which compares a variant against a number.
+# The fallback is a value the checks below already reject: -1 for a count or an
+# id, which every bounds check catches, and 0 for a frequency.
+fn i64_or(s: Str, fallback: I64) -> I64 {
+  match i64_of_str(s) {
+    Some(v) => v,
+    None => fallback,
+  }
+}
+
 fn load(s: Str, out: Vocab) -> Str {
   let ls: Arr[Str] = text.lines(s)
   if len(ls) < 3 {
@@ -442,8 +454,8 @@ fn load(s: Str, out: Vocab) -> Str {
   if not text.starts_with(ls[2], "unk ") {
     return "vocab.load: line 3: expected 'unk <id>'"
   }
-  let reserved: I64 = i64_of_str(text.trim_prefix(ls[1], "reserved "))
-  let unk: I64 = i64_of_str(text.trim_prefix(ls[2], "unk "))
+  let reserved: I64 = i64_or(text.trim_prefix(ls[1], "reserved "), -1)
+  let unk: I64 = i64_or(text.trim_prefix(ls[2], "unk "), -1)
 
   let d: Dict[Str, I64] = {}
   let t: Arr[Str] = []
@@ -471,7 +483,7 @@ fn load(s: Str, out: Vocab) -> Str {
       }
       let id: I64 = len(out.toks)
       push(out.toks, tok)
-      push(out.freqs, i64_of_str(text.slice(ls[i], sp + 1, len(ls[i]))))
+      push(out.freqs, i64_or(text.slice(ls[i], sp + 1, len(ls[i])), 0))
       out.ids[tok] = id
     }
     i = i + 1

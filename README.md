@@ -1,11 +1,11 @@
 <p align="center">
-  <img alt="twill" src="https://raw.githubusercontent.com/martin-k-m/twill/main/assets/twill-mark.png" width="120">
+  <img alt="twill" src="https://raw.githubusercontent.com/twill-lang/twill/main/assets/twill-mark.png" width="120">
 </p>
 
 <h1 align="center">skein</h1>
 
 <p align="center">
-  <b>Text and sequence handling for <a href="https://github.com/martin-k-m/twill">twill</a>.</b><br>
+  <b>Text and sequence handling for <a href="https://github.com/twill-lang/twill">twill</a>.</b><br>
   Written in twill.
 </p>
 
@@ -267,7 +267,7 @@ because the vocabulary was rebuilt and the checkpoint was not), and calls
 Once spool and `mode systems` both work:
 
 ```
-spool add skein https://github.com/martin-k-m/skein
+spool add skein https://github.com/twill-lang/skein
 ```
 
 spool vendors into `twill_modules/`, and twill's import is a path, so the import

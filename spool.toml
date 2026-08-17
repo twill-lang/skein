@@ -17,4 +17,4 @@ entry = "src/encoding.tw"
 # rather than an assumption because skein calls std/text on every code path and
 # hands ids to std/nn's embedding, and a change to either is a change to what
 # this package does.
-twill = { version = "^1.5.0", git = "https://github.com/martin-k-m/twill" }
+twill = { version = "^1.5.0", git = "https://github.com/twill-lang/twill" }

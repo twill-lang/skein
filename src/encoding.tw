@@ -68,7 +68,7 @@ import "../src/pieces.tw" as pieces
 #   special    true for a token the tokeniser added rather than found
 #
 # The dtype each column becomes at the tensor boundary, using the language's
-# dtype set (raster docs/dtypes.md), because the consumer builds the tensor and
+# dtype set (twill docs/dtypes.md), because the consumer builds the tensor and
 # building it at the right width beats building it at f64 and narrowing after:
 #
 #   ids, type_ids   i32. They are row indices into an embedding table and into a
@@ -81,7 +81,7 @@ import "../src/pieces.tw" as pieces
 #                   most read them as a plain array for span mapping and never do.
 #
 # These are held as Arr[I64] here because the systems subset has no narrower
-# array yet (raster NEEDS-111); the dtype is the width the model should build,
+# array yet (twill NEEDS-111); the dtype is the width the model should build,
 # not the width skein stores. A warp pipeline over token ids declares it with
 # `pipe.astype(p, dt.DT_I32)`, and the mask column with DT_BOOL.
 struct Encoding {

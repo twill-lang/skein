@@ -327,7 +327,7 @@ is the single point where skein touches the numeric half of the language and it
 is the one interface in the package that has not been checked against a real
 implementation of anything.
 
-Since this was written, the numeric half grew narrow dtypes (raster
+Since this was written, the numeric half grew narrow dtypes (twill
 `docs/dtypes.md`), which sharpens what the conversion should produce rather than
 changing what is missing. The id and type-id columns are row indices and want
 i32, the dtype twill gives every index; the mask is a per-token 1-or-0 and wants

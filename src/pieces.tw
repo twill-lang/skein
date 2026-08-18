@@ -23,6 +23,8 @@ mode systems
 # name is `nstarts`. Reviewing an offset bug then reduces to checking that no
 # `nstart` reached a field called `start`.
 
+import "std/text" as text
+
 struct Pieces {
   toks: Arr[Str],
   nstarts: Arr[I64],
@@ -59,15 +61,19 @@ fn extend(dst: Pieces, src: Pieces) {
 # The tokens joined by a space. For test assertions and for printing, not for
 # reconstruction: a tokeniser's output is not required to rejoin into its input
 # and for WordPiece and BPE it does not.
+#
+# A `Bytes` builder and not `+` in the loop: `Str` is immutable, so each `+`
+# copies everything accumulated so far and joining n tokens is quadratic in the
+# result length. It costs the same number of lines here.
 fn debug_join(p: Pieces) -> Str {
-  let out: Str = ""
+  let out: Bytes = bytes_new()
   let i: I64 = 0
   while i < len(p.toks) {
     if i > 0 {
-      out = out + " "
+      text.push_str(out, " ")
     }
-    out = out + p.toks[i]
+    text.push_str(out, p.toks[i])
     i = i + 1
   }
-  out
+  bytes_to_str(out)
 }

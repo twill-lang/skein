@@ -145,28 +145,52 @@ fn assert_shape(e: Encoding) -> Str {
 # `is_special_id` answer correctly, which is what truncation and offset
 # reporting need.
 #
-# An id of -1 means the token is not configured. Padding without a `[PAD]` is
+# `None` means the token is not configured. Padding without a `[PAD]` is
 # refused rather than defaulted to id 0, because id 0 is a real token in a
 # vocabulary that did not reserve one, and padding a batch with the word "the"
 # is a bug that trains.
+#
+# These were -1 until 1.6, and unlike the `starts` and `ends` columns above
+# there is nothing here that has to survive into a tensor, so the sentinel had
+# no job the type cannot do. It also had a hazard: `is_special_id` needed an
+# `if id < 0` guard at the top for no reason other than that an unconfigured
+# special held -1 and would have matched a caller asking about id -1. With
+# `Opt` there is no id to collide with, and the guard is gone.
 struct Specials {
   cls: Str,
   sep: Str,
   pad: Str,
   unk: Str,
   msk: Str,
-  cls_id: I64,
-  sep_id: I64,
-  pad_id: I64,
-  unk_id: I64,
-  msk_id: I64,
+  cls_id: Opt[I64],
+  sep_id: Opt[I64],
+  pad_id: Opt[I64],
+  unk_id: Opt[I64],
+  msk_id: Opt[I64],
   extra: Arr[I64],
 }
 
 fn no_specials() -> Specials {
   let x: Arr[I64] = []
   Specials { cls: "", sep: "", pad: "", unk: "", msk: "",
-             cls_id: -1, sep_id: -1, pad_id: -1, unk_id: -1, msk_id: -1, extra: x }
+             cls_id: None, sep_id: None, pad_id: None, unk_id: None, msk_id: None,
+             extra: x }
+}
+
+# `Some(id)` when this configured special has that id. `None` matches nothing,
+# which is the whole reason the field is an `Opt`.
+fn opt_is(o: Opt[I64], id: I64) -> Bool {
+  match o {
+    Some(x) => x == id,
+    None => false,
+  }
+}
+
+fn opt_count(o: Opt[I64], n: I64) -> I64 {
+  match o {
+    Some(_) => n,
+    None => 0,
+  }
 }
 
 # The conventional five. Any of the names may be empty, meaning "this model does
@@ -176,9 +200,9 @@ fn bert_specials() -> Arr[Str] {
   a
 }
 
-fn lookup(v: vocab.Vocab, tok: Str) -> I64 {
+fn lookup(v: vocab.Vocab, tok: Str) -> Opt[I64] {
   if len(tok) == 0 {
-    return -1
+    return None
   }
   vocab.id_of(v, tok)
 }
@@ -194,8 +218,11 @@ fn specials_from(v: vocab.Vocab, cls: Str, sep: Str, pad: Str, unk: Str,
   let names: Arr[Str] = [cls, sep, pad, unk, msk]
   let i: I64 = 0
   while i < len(names) {
-    if len(names[i]) > 0 and vocab.id_of(v, names[i]) < 0 {
-      return "encoding.specials_from: '" + names[i] + "' is not in the vocabulary"
+    if len(names[i]) > 0 {
+      match vocab.id_of(v, names[i]) {
+        Some(_) => unit,
+        None => return "encoding.specials_from: '" + names[i] + "' is not in the vocabulary",
+      }
     }
     i = i + 1
   }
@@ -215,20 +242,16 @@ fn specials_from(v: vocab.Vocab, cls: Str, sep: Str, pad: Str, unk: Str,
 }
 
 fn register_extra(sp: Specials, v: vocab.Vocab, tok: Str) -> Str {
-  let id: I64 = vocab.id_of(v, tok)
-  if id < 0 {
-    return "encoding.register_extra: '" + tok + "' is not in the vocabulary"
+  match vocab.id_of(v, tok) {
+    Some(id) => push(sp.extra, id),
+    None => return "encoding.register_extra: '" + tok + "' is not in the vocabulary",
   }
-  push(sp.extra, id)
   ""
 }
 
 fn is_special_id(sp: Specials, id: I64) -> Bool {
-  if id < 0 {
-    return false
-  }
-  if id == sp.cls_id or id == sp.sep_id or id == sp.pad_id
-     or id == sp.unk_id or id == sp.msk_id {
+  if opt_is(sp.cls_id, id) or opt_is(sp.sep_id, id) or opt_is(sp.pad_id, id)
+     or opt_is(sp.unk_id, id) or opt_is(sp.msk_id, id) {
     return true
   }
   let i: I64 = 0
@@ -246,20 +269,12 @@ fn is_special_id(sp: Specials, id: I64) -> Bool {
 # `[UNK]` and `[MASK]` are not counted: they replace a real token rather than
 # being added around one. Counting them is the commonest way a max length is
 # quietly exceeded by two.
-fn overhead_single(sp: Specials) -> I64 {
-  let n: I64 = 0
-  if sp.cls_id >= 0 { n = n + 1 }
-  if sp.sep_id >= 0 { n = n + 1 }
-  n
-}
+fn overhead_single(sp: Specials) -> I64 =
+  opt_count(sp.cls_id, 1) + opt_count(sp.sep_id, 1)
 
 # `[CLS] a [SEP] b [SEP]`: one more separator than the single case.
-fn overhead_pair(sp: Specials) -> I64 {
-  let n: I64 = 0
-  if sp.cls_id >= 0 { n = n + 1 }
-  if sp.sep_id >= 0 { n = n + 2 }
-  n
-}
+fn overhead_pair(sp: Specials) -> I64 =
+  opt_count(sp.cls_id, 1) + opt_count(sp.sep_id, 2)
 
 # ---- from pieces to an encoding ---------------------------------------------
 
@@ -307,9 +322,19 @@ fn trim_leading_space(e: Encoding, source: Str) {
 
 # ---- truncation --------------------------------------------------------------
 
-let TRUNC_RIGHT: I64 = 0
-let TRUNC_LEFT: I64 = 1
-let TRUNC_LONGEST_FIRST: I64 = 2
+# The three truncation strategies.
+#
+# The case names keep their `Trunc` prefix rather than being `Right`, `Left` and
+# `LongestFirst`. `Pad` below has a `Right` and a `Left` too, and two enums in
+# scope sharing a case name is exactly the ambiguity the qualified form exists
+# for; prefixing here means no call site ever has to write the qualifier, and a
+# `TruncRight` handed to a padding argument is a type error rather than a 0 that
+# happened to mean the right thing.
+#
+# Nothing serialises these. A merges file records the model, not the caller's
+# truncation policy, so there is no on-disk representation to preserve and the
+# integers they replaced were never written anywhere.
+enum Trunc { TruncRight, TruncLeft, TruncLongestFirst }
 
 # Keep the first `keep` tokens.
 #
@@ -326,6 +351,26 @@ fn truncate_right(e: Encoding, keep: I64) -> Encoding {
     i = i + 1
   }
   out
+}
+
+# The single-sequence truncation a strategy implies.
+#
+# The one exhaustive `match` on `Trunc` in the file, so adding a fourth strategy
+# reports here and nowhere else. It used to be four copies of
+# `if strategy == TRUNC_LEFT { left } else { right }`, two in `build_single` and
+# two in `build_pair`, and a fourth strategy would have taken the `else` in all
+# four silently.
+#
+# Longest-first degrades to right truncation, which is what the old `else` did.
+# It is written out rather than swept under a `_` because it is a real decision:
+# longest-first balances two sequences against each other and there is only one
+# sequence here, so there is nothing for it to balance.
+fn truncate_one(e: Encoding, keep: I64, strategy: Trunc) -> Encoding {
+  match strategy {
+    TruncLeft => truncate_left(e, keep),
+    TruncRight => truncate_right(e, keep),
+    TruncLongestFirst => truncate_right(e, keep),
+  }
 }
 
 fn truncate_left(e: Encoding, keep: I64) -> Encoding {
@@ -387,10 +432,11 @@ fn truncate_longest_first(a: Encoding, b: Encoding, budget: I64,
 
 # ---- assembling -------------------------------------------------------------
 
-fn add_special(e: Encoding, id: I64, tok: Str, type_id: I64) {
-  if id >= 0 {
+fn add_special(e: Encoding, id: Opt[I64], tok: Str, type_id: I64) {
+  match id {
     # Empty span. See the header.
-    push_token(e, id, tok, 1, type_id, -1, -1, true)
+    Some(x) => push_token(e, x, tok, 1, type_id, -1, -1, true),
+    None => unit,
   }
 }
 
@@ -401,18 +447,14 @@ fn add_special(e: Encoding, id: I64, tok: Str, type_id: I64) {
 # that hit the limit, and a model trained with a separator and fed sequences
 # without one degrades in a way that looks like a data problem.
 fn build_single(n: normalize.Norm, p: pieces.Pieces, v: vocab.Vocab,
-                sp: Specials, max_len: I64, strategy: I64) -> Encoding {
+                sp: Specials, max_len: I64, strategy: Trunc) -> Encoding {
   let body: Encoding = from_pieces(n, p, v, 0)
   if max_len > 0 {
     let budget: I64 = max_len - overhead_single(sp)
     if budget < 0 {
       budget = 0
     }
-    if strategy == TRUNC_LEFT {
-      body = truncate_left(body, budget)
-    } else {
-      body = truncate_right(body, budget)
-    }
+    body = truncate_one(body, budget, strategy)
   }
   let out: Encoding = new_encoding()
   add_special(out, sp.cls_id, sp.cls, 0)
@@ -433,7 +475,7 @@ fn build_single(n: normalize.Norm, p: pieces.Pieces, v: vocab.Vocab,
 # except the one the pair task is measured by.
 fn build_pair(na: normalize.Norm, pa: pieces.Pieces,
               nb: normalize.Norm, pb: pieces.Pieces,
-              v: vocab.Vocab, sp: Specials, max_len: I64, strategy: I64) -> Encoding {
+              v: vocab.Vocab, sp: Specials, max_len: I64, strategy: Trunc) -> Encoding {
   let a: Encoding = from_pieces(na, pa, v, 0)
   let b: Encoding = from_pieces(nb, pb, v, 1)
   if max_len > 0 {
@@ -441,7 +483,7 @@ fn build_pair(na: normalize.Norm, pa: pieces.Pieces,
     if budget < 0 {
       budget = 0
     }
-    if strategy == TRUNC_LONGEST_FIRST {
+    if strategy == TruncLongestFirst {
       let ta: Encoding = new_encoding()
       let tb: Encoding = new_encoding()
       truncate_longest_first(a, b, budget, ta, tb)
@@ -456,20 +498,12 @@ fn build_pair(na: normalize.Norm, pa: pieces.Pieces,
       if keep_b < 0 {
         keep_b = 0
       }
-      if strategy == TRUNC_LEFT {
-        b = truncate_left(b, keep_b)
-      } else {
-        b = truncate_right(b, keep_b)
-      }
+      b = truncate_one(b, keep_b, strategy)
       let keep_a: I64 = budget - length(b)
       if keep_a < 0 {
         keep_a = 0
       }
-      if strategy == TRUNC_LEFT {
-        a = truncate_left(a, keep_a)
-      } else {
-        a = truncate_right(a, keep_a)
-      }
+      a = truncate_one(a, keep_a, strategy)
     }
   }
   let out: Encoding = new_encoding()
@@ -491,8 +525,7 @@ fn build_pair(na: normalize.Norm, pa: pieces.Pieces,
 
 # ---- padding -----------------------------------------------------------------
 
-let PAD_RIGHT: I64 = 0
-let PAD_LEFT: I64 = 1
+enum Pad { PadRight, PadLeft }
 
 # Pad to `width`, or leave alone if already at or over it.
 #
@@ -506,41 +539,52 @@ let PAD_LEFT: I64 = 1
 # batch of unequal lengths gives the same result as running each row alone. A
 # padding token with mask 1 is the single most expensive one-character bug in
 # this area, because the model trains happily and learns to predict `[PAD]`.
-fn pad_to(e: Encoding, width: I64, sp: Specials, side: I64) -> Str {
-  if sp.pad_id < 0 {
-    return "encoding.pad_to: no padding token is configured, and padding with an arbitrary id would insert a real word"
+fn pad_to(e: Encoding, width: I64, sp: Specials, side: Pad) -> Str {
+  let pad_id: I64 = match sp.pad_id {
+    Some(id) => id,
+    None => return "encoding.pad_to: no padding token is configured, and padding with an arbitrary id would insert a real word",
   }
   let need: I64 = width - length(e)
   if need <= 0 {
     return ""
   }
-  if side == PAD_LEFT {
-    let out: Encoding = new_encoding()
-    let k: I64 = 0
-    while k < need {
-      push_token(out, sp.pad_id, sp.pad, 0, 0, -1, -1, true)
-      k = k + 1
-    }
-    let i: I64 = 0
-    while i < length(e) {
-      copy_token(out, e, i)
-      i = i + 1
-    }
-    e.ids = out.ids
-    e.tokens = out.tokens
-    e.mask = out.mask
-    e.type_ids = out.type_ids
-    e.starts = out.starts
-    e.ends = out.ends
-    e.special = out.special
-    return ""
-  }
-  let k: I64 = 0
-  while k < need {
-    push_token(e, sp.pad_id, sp.pad, 0, 0, -1, -1, true)
-    k = k + 1
+  match side {
+    PadLeft => pad_left_in_place(e, need, pad_id, sp.pad),
+    PadRight => pad_right_in_place(e, need, pad_id, sp.pad),
   }
   ""
+}
+
+# Left padding rebuilds the encoding, because the pads go in front and the
+# parallel arrays have no prepend. Right padding appends in place, which is why
+# the two are not one function with a flag.
+fn pad_left_in_place(e: Encoding, need: I64, pad_id: I64, pad: Str) {
+  let out: Encoding = new_encoding()
+  let k: I64 = 0
+  while k < need {
+    push_token(out, pad_id, pad, 0, 0, -1, -1, true)
+    k = k + 1
+  }
+  let i: I64 = 0
+  while i < length(e) {
+    copy_token(out, e, i)
+    i = i + 1
+  }
+  e.ids = out.ids
+  e.tokens = out.tokens
+  e.mask = out.mask
+  e.type_ids = out.type_ids
+  e.starts = out.starts
+  e.ends = out.ends
+  e.special = out.special
+}
+
+fn pad_right_in_place(e: Encoding, need: I64, pad_id: I64, pad: Str) {
+  let k: I64 = 0
+  while k < need {
+    push_token(e, pad_id, pad, 0, 0, -1, -1, true)
+    k = k + 1
+  }
 }
 
 # ---- batches -----------------------------------------------------------------
@@ -578,7 +622,7 @@ fn longest(b: Batch) -> I64 {
 # batch of 32 tweets padded to 512 is 15 times the arithmetic for the same
 # result. Bucketing by length before batching makes this much better still, and
 # that is `src/sequence.tw`.
-fn pad_batch_longest(b: Batch, sp: Specials, side: I64) -> Str {
+fn pad_batch_longest(b: Batch, sp: Specials, side: Pad) -> Str {
   let w: I64 = longest(b)
   let i: I64 = 0
   while i < len(b.items) {
@@ -591,7 +635,7 @@ fn pad_batch_longest(b: Batch, sp: Specials, side: I64) -> Str {
   ""
 }
 
-fn pad_batch_fixed(b: Batch, width: I64, sp: Specials, side: I64) -> Str {
+fn pad_batch_fixed(b: Batch, width: I64, sp: Specials, side: Pad) -> Str {
   let i: I64 = 0
   while i < len(b.items) {
     let err: Str = pad_to(b.items[i], width, sp, side)
@@ -646,22 +690,31 @@ fn source_text(e: Encoding, i: I64, source: Str) -> Str {
 # skipped rather than treated as zero-width at 0, which is the whole reason
 # their span is -1.
 fn source_span(e: Encoding, a: I64, b: I64) -> normalize.Span {
-  let lo: I64 = -1
-  let hi: I64 = -1
+  # `Opt` rather than a `lo` and a `hi` both starting at -1. Those were two
+  # correlated locals, and only `lo` was ever tested for the sentinel: `hi`
+  # relied on every real end being greater than -1, which is true and is not
+  # something the code said. One `Opt` covers both, and "no token in this range
+  # had a source" is the `None` at the end rather than a comparison.
+  let found: Opt[normalize.Span] = None
   let i: I64 = a
   while i <= b and i < length(e) {
     if i >= 0 and e.starts[i] >= 0 {
-      if lo < 0 or e.starts[i] < lo {
-        lo = e.starts[i]
-      }
-      if e.ends[i] > hi {
-        hi = e.ends[i]
-      }
+      found = widen_span(found, e.starts[i], e.ends[i])
     }
     i = i + 1
   }
-  if lo < 0 {
-    return normalize.empty_span()
+  match found {
+    Some(sp) => sp,
+    None => normalize.empty_span(),
   }
-  normalize.span(lo, hi)
+}
+
+# The span grown to cover [lo, hi), or that span when there was nothing yet.
+fn widen_span(cur: Opt[normalize.Span], lo: I64, hi: I64) -> Opt[normalize.Span] {
+  match cur {
+    None => Some(normalize.span(lo, hi)),
+    Some(sp) => Some(normalize.span(
+      if lo < sp.start { lo } else { sp.start },
+      if hi > sp.end { hi } else { sp.end })),
+  }
 }

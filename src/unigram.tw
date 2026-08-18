@@ -96,11 +96,10 @@ fn new_unigram(v: vocab.Vocab, unk: Str, unk_logp: F64) -> Unigram {
 }
 
 fn set_logp(m: Unigram, tok: Str, lp: F64) -> Str {
-  let id: I64 = vocab.id_of(m.v, tok)
-  if id < 0 {
-    return "unigram.set_logp: '" + tok + "' is not in the vocabulary"
+  match vocab.id_of(m.v, tok) {
+    Some(id) => m.logp[id] = lp,
+    None => return "unigram.set_logp: '" + tok + "' is not in the vocabulary",
   }
-  m.logp[id] = lp
   ""
 }
 
@@ -173,7 +172,12 @@ fn validate(m: Unigram) -> Str {
 #
 # `best[k]` is the score of the best path ending at character boundary k;
 # `back[k]` is the boundary the winning edge came from, and `bid[k]` is the id
-# of the piece on it, or -1 for the unknown edge.
+# of the piece on it, or `None` for the unknown edge.
+#
+# `bid` is `Arr[Opt[I64]]` rather than an `Arr[I64]` carrying a -1: "this edge
+# is the unknown token" is the absence of a vocabulary id, not a special one.
+# It is read once per piece on the way back out, where the old `rev_id[r] >= 0`
+# test was the only thing standing between an unknown edge and `token_of(-1)`.
 fn encode_word(m: Unigram, s: Str, a: I64, b: I64, out: pieces.Pieces) {
   let w: Str = text.slice(s, a, b)
   let starts: Arr[I64] = text.char_starts(w)
@@ -184,12 +188,12 @@ fn encode_word(m: Unigram, s: Str, a: I64, b: I64, out: pieces.Pieces) {
 
   let best: Arr[F64] = []
   let back: Arr[I64] = []
-  let bid: Arr[I64] = []
+  let bid: Arr[Opt[I64]] = []
   let k: I64 = 0
   while k <= nchars {
     push(best, UNREACHABLE)
     push(back, -1)
-    push(bid, -1)
+    push(bid, None)
     k = k + 1
   }
   best[0] = 0.0
@@ -202,20 +206,26 @@ fn encode_word(m: Unigram, s: Str, a: I64, b: I64, out: pieces.Pieces) {
     while i >= 0 and starts[j] - starts[i] <= m.max_piece_bytes {
       if best[i] > UNREACHABLE {
         let piece: Str = text.slice(w, starts[i], starts[j])
-        let id: I64 = vocab.id_of(m.v, piece)
-        let score: F64 = UNREACHABLE
-        let use_id: I64 = -1
-        if id >= 0 {
-          score = best[i] + logp_of(m, id)
-          use_id = id
+        let found: Opt[I64] = vocab.id_of(m.v, piece)
+        let score: F64 = match found {
+          Some(id) => best[i] + logp_of(m, id),
+          None => UNREACHABLE,
         }
+        let use_id: Opt[I64] = found
         # The unknown edge exists only for a single character, so that a word
         # cannot be swallowed whole by one cheap unknown token.
         if i == j - 1 {
           let ucand: F64 = best[i] + m.unk_logp
-          if id < 0 or ucand > score {
+          # `None => true` is the old `id < 0 or ...`: with no piece in the
+          # vocabulary the unknown edge is the only edge, so it wins whatever
+          # its score.
+          let take_unk: Bool = match found {
+            None => true,
+            Some(_) => ucand > score,
+          }
+          if take_unk {
             score = ucand
-            use_id = -1
+            use_id = None
           }
         }
         if score > UNREACHABLE and score > best[j] {
@@ -233,7 +243,7 @@ fn encode_word(m: Unigram, s: Str, a: I64, b: I64, out: pieces.Pieces) {
   # single-character unknown edge guarantees every boundary has a predecessor.
   let rev_start: Arr[I64] = []
   let rev_stop: Arr[I64] = []
-  let rev_id: Arr[I64] = []
+  let rev_id: Arr[Opt[I64]] = []
   let at: I64 = nchars
   while at > 0 {
     push(rev_start, back[at])
@@ -245,7 +255,10 @@ fn encode_word(m: Unigram, s: Str, a: I64, b: I64, out: pieces.Pieces) {
   while r >= 0 {
     let lo: I64 = starts[rev_start[r]]
     let hi: I64 = starts[rev_stop[r]]
-    let tok: Str = if rev_id[r] >= 0 { vocab.token_of(m.v, rev_id[r]) } else { m.unk }
+    let tok: Str = match rev_id[r] {
+      Some(id) => vocab.token_of(m.v, id),
+      None => m.unk,
+    }
     pieces.add(out, tok, a + lo, a + hi)
     r = r - 1
   }
@@ -270,11 +283,9 @@ fn score_word(m: Unigram, w: Str) -> F64 {
   let total: F64 = 0.0
   let i: I64 = 0
   while i < len(out.toks) {
-    let id: I64 = vocab.id_of(m.v, out.toks[i])
-    if id >= 0 {
-      total = total + logp_of(m, id)
-    } else {
-      total = total + m.unk_logp
+    total = total + match vocab.id_of(m.v, out.toks[i]) {
+      Some(id) => logp_of(m, id),
+      None => m.unk_logp,
     }
     i = i + 1
   }

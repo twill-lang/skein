@@ -8,9 +8,9 @@ fn reserved_tokens_take_the_lowest_ids() {
   let r: Arr[Str] = ["[PAD]", "[UNK]", "[CLS]"]
   let err: Str = vb.add_reserved(v, r, "[UNK]")
   t.equal_str("reserving succeeded", err, "")
-  t.equal_i64("PAD is id 0", vb.id_of(v, "[PAD]"), 0)
-  t.equal_i64("UNK is id 1", vb.id_of(v, "[UNK]"), 1)
-  t.equal_i64("CLS is id 2", vb.id_of(v, "[CLS]"), 2)
+  t.equal_opt_i64("PAD is id 0", vb.id_of(v, "[PAD]"), Some(0))
+  t.equal_opt_i64("UNK is id 1", vb.id_of(v, "[UNK]"), Some(1))
+  t.equal_opt_i64("CLS is id 2", vb.id_of(v, "[CLS]"), Some(2))
   t.equal_i64("the unknown id was recorded", v.unk_id, 1)
   t.equal_i64("three ids are reserved", v.reserved, 3)
   t.check("id 2 is reserved", vb.is_reserved(v, 2))
@@ -34,7 +34,7 @@ fn an_absent_token_reads_as_minus_one_and_not_as_the_unknown_id() {
   let v: vb.Vocab = vb.new_vocab()
   let r: Arr[Str] = ["[UNK]"]
   vb.add_reserved(v, r, "[UNK]")
-  t.equal_i64("id_of says absent", vb.id_of(v, "nope"), -1)
+  t.equal_opt_i64("id_of says absent", vb.id_of(v, "nope"), None)
   t.equal_i64("id_or_unk says unknown", vb.id_or_unk(v, "nope"), 0)
 }
 
@@ -125,11 +125,20 @@ fn a_cutoff_never_removes_a_reserved_token() {
 
 fn hex_round_trips_every_byte_including_the_awkward_ones() {
   let s: Str = "a b" + chr(0) + chr(10) + chr(255)
-  t.equal_str("round trip", vb.from_hex(vb.to_hex(s)), s)
+  # `from_hex` reports malformed input as `None`, so `hex_ok` is gone and these
+  # assertions go through the decoder itself. That is stronger, not weaker: the
+  # old `hex_ok` said a string would decode, and these say what it decodes to.
+  match vb.from_hex(vb.to_hex(s)) {
+    Some(got) => t.equal_str("round trip", got, s),
+    None => t.check("the round trip decoded at all", false),
+  }
   t.equal_str("a known encoding", vb.to_hex("AB"), "4142")
-  t.check("an odd-length hex string is rejected", not vb.hex_ok("abc"))
-  t.check("a non-hex character is rejected", not vb.hex_ok("zz"))
-  t.check("uppercase hex is accepted on read", vb.hex_ok("4142"))
+  t.check("an odd-length hex string is rejected",
+          match vb.from_hex("abc") { None => true, Some(_) => false })
+  t.check("a non-hex character is rejected",
+          match vb.from_hex("zz") { None => true, Some(_) => false })
+  t.check("uppercase hex is accepted on read",
+          match vb.from_hex("4142") { Some(got) => got == "AB", None => false })
 }
 
 fn a_vocabulary_round_trips_through_its_file_format() {
@@ -147,8 +156,8 @@ fn a_vocabulary_round_trips_through_its_file_format() {
   t.equal_i64("the same size", vb.size(w), vb.size(v))
   t.equal_i64("the same reserved count", w.reserved, v.reserved)
   t.equal_i64("the same unknown id", w.unk_id, v.unk_id)
-  t.equal_i64("a space kept its id", vb.id_of(w, " "), vb.id_of(v, " "))
-  t.equal_i64("a newline kept its id", vb.id_of(w, chr(10)), vb.id_of(v, chr(10)))
+  t.equal_opt_i64("a space kept its id", vb.id_of(w, " "), vb.id_of(v, " "))
+  t.equal_opt_i64("a newline kept its id", vb.id_of(w, chr(10)), vb.id_of(v, chr(10)))
   t.equal_str("and saving it again gives the same bytes", vb.save(w), blob)
 }
 

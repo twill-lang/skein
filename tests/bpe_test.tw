@@ -13,8 +13,8 @@ fn the_base_alphabet_is_every_byte() {
   t.equal_i64("256 base tokens", vb.size(m.v), 256)
   t.check("byte zero is in the vocabulary", vb.contains(m.v, chr(0)))
   t.check("byte 255 is in the vocabulary", vb.contains(m.v, chr(255)))
-  t.equal_i64("byte 65 is at id 65 with no reserved tokens",
-              vb.id_of(m.v, chr(65)), 65)
+  t.equal_opt_i64("byte 65 is at id 65 with no reserved tokens",
+                  vb.id_of(m.v, chr(65)), Some(65))
 }
 
 fn reserved_tokens_push_the_alphabet_up_by_their_count() {
@@ -22,7 +22,7 @@ fn reserved_tokens_push_the_alphabet_up_by_their_count() {
   let r: Arr[Str] = ["[PAD]", "[CLS]"]
   let m: bpe.Bpe = bpe.train(docs, 0, 2, r, false, false)
   t.equal_i64("258 tokens", vb.size(m.v), 258)
-  t.equal_i64("byte 65 moved up by two", vb.id_of(m.v, chr(65)), 67)
+  t.equal_opt_i64("byte 65 moved up by two", vb.id_of(m.v, chr(65)), Some(67))
 }
 
 fn training_merges_the_most_frequent_pair_first() {
@@ -165,7 +165,13 @@ fn the_merge_file_round_trips() {
   t.equal_i64("the same number of merges", bpe.num_merges(w), bpe.num_merges(m))
   t.check("the space prefix flag came back", w.space_prefix)
   t.equal_str("and saving again gives the same bytes", bpe.save_merges(w), blob)
-  t.equal_i64("the first merge kept its rank", bpe.rank_of(w, m.left[0], m.right[0]), 0)
+  # `rank_of` gives an `Opt`, so the reloaded pair being absent entirely is now
+  # a distinct failure from it coming back with the wrong rank. Under the old
+  # -1 both showed up as "not 0".
+  match bpe.rank_of(w, m.left[0], m.right[0]) {
+    Some(rank) => t.equal_i64("the first merge kept its rank", rank, 0),
+    None => t.check("the first merge survived the round trip at all", false),
+  }
 }
 
 fn a_corrupt_merge_file_is_refused() {
@@ -182,7 +188,8 @@ fn punctuation_splitting_stops_a_merge_across_a_comma() {
   let docs: Arr[Str] = ["a, a, a,"]
   let r: Arr[Str] = []
   let m: bpe.Bpe = bpe.train(docs, 5, 2, r, false, true)
-  t.check("the pair a-comma was never learned", bpe.rank_of(m, "a", ",") < 0)
+  t.check("the pair a-comma was never learned",
+          match bpe.rank_of(m, "a", ",") { None => true, Some(_) => false })
 }
 
 the_base_alphabet_is_every_byte()

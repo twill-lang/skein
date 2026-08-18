@@ -42,6 +42,23 @@ fn equal_i64(name: Str, got: I64, want: I64) {
   equal_str(name, str(got), str(want))
 }
 
+# For the lookups that return `Opt[I64]`: a vocabulary id, a merge rank.
+#
+# Compared through their printed forms, like `equal_i64`, so a failure shows
+# "got: None, want: Some(3)" rather than a bare false. Asserting `None` this way
+# is stronger than the `< 0` it replaced, which passed for any negative number
+# and for a sentinel that had drifted.
+fn opt_str(o: Opt[I64]) -> Str {
+  match o {
+    Some(v) => "Some(" + str(v) + ")",
+    None => "None",
+  }
+}
+
+fn equal_opt_i64(name: Str, got: Opt[I64], want: Opt[I64]) {
+  equal_str(name, opt_str(got), opt_str(want))
+}
+
 # Floats are compared with a tolerance, and the tolerance is an argument rather
 # than a constant in here. A log-probability test wants 1e-12 and a Viterbi
 # total over forty pieces wants 1e-9, and a single shared epsilon would be wrong

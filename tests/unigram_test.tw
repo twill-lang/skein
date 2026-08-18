@@ -6,6 +6,19 @@ import "../src/vocab.tw" as vb
 import "../src/pieces.tw" as pc
 import "../src/pretok.tw" as pt
 
+
+# The id of a token this test has just put in the vocabulary.
+#
+# `abort` and not a fallback. If a fixture token is missing, the assertion below
+# would otherwise silently measure a different piece, and a test that passes
+# against the wrong token is worse than one that stops.
+fn must_id(v: vb.Vocab, tok: Str) -> I64 {
+  match vb.id_of(v, tok) {
+    Some(id) => id,
+    None => abort("test fixture: '" + tok + "' is not in the vocabulary"),
+  }
+}
+
 fn build(words: Arr[Str]) -> vb.Vocab {
   let v: vb.Vocab = vb.new_vocab()
   let r: Arr[Str] = ["[UNK]"]
@@ -106,8 +119,8 @@ fn fitting_from_counts_gives_relative_frequencies() {
   vb.observe(c, "b", 1)
   let err: Str = ug.fit(m, c)
   t.equal_str("it fitted", err, "")
-  t.near("a is log 0.75", ug.logp_of(m, vb.id_of(v, "a")), f64_log(0.75), 0.000000000001)
-  t.near("b is log 0.25", ug.logp_of(m, vb.id_of(v, "b")), f64_log(0.25), 0.000000000001)
+  t.near("a is log 0.75", ug.logp_of(m, must_id(v, "a")), f64_log(0.75), 0.000000000001)
+  t.near("b is log 0.25", ug.logp_of(m, must_id(v, "b")), f64_log(0.25), 0.000000000001)
 }
 
 fn a_piece_with_no_count_gets_the_unknown_score() {
@@ -116,7 +129,7 @@ fn a_piece_with_no_count_gets_the_unknown_score() {
   let c: vb.Counts = vb.new_counts()
   vb.observe(c, "a", 2)
   ug.fit(m, c)
-  t.near("unseen fell back", ug.logp_of(m, vb.id_of(v, "unseen")), -20.0, 0.0)
+  t.near("unseen fell back", ug.logp_of(m, must_id(v, "unseen")), -20.0, 0.0)
 }
 
 fn fitting_from_empty_counts_is_refused() {

@@ -96,15 +96,19 @@ fn new_bpe(space_prefix: Bool) -> Bpe {
 
 fn num_merges(m: Bpe) -> I64 = len(m.left)
 
-# The rank of a pair, or -1 when it was never learned. Lower is earlier is
+# The rank of a pair, or `None` when it was never learned. Lower is earlier is
 # stronger.
-fn rank_of(m: Bpe, a: Str, b: Str) -> I64 {
-  let k: Str = pair_key(a, b)
-  if dict_has(m.rank, k) {
-    return m.rank[k]
-  }
-  -1
-}
+#
+# `dict_get` rather than `dict_has` followed by an index. That is one hash of
+# the pair key instead of two, and this is the single hottest call in skein: it
+# runs once per adjacent symbol pair per merge round of every word encoded. The
+# `Opt` is not an extra allocation on top of that, it is the value `dict_get`
+# already builds, so the sentinel went away and the lookup got cheaper at the
+# same time.
+#
+# Rank 0 is a real rank -- the first merge learned -- and the old -1 existed
+# only because 0 was taken. That is the shape of sentinel `Opt` is for.
+fn rank_of(m: Bpe, a: Str, b: Str) -> Opt[I64] = dict_get(m.rank, pair_key(a, b))
 
 # ---- the base alphabet ------------------------------------------------------
 
@@ -329,24 +333,43 @@ fn encode_symbols(m: Bpe, w: Str) -> Arr[Str] {
   }
   let merging: Bool = true
   while merging {
-    let best_rank: I64 = -1
-    let bi: I64 = -1
+    let best: Opt[Best] = None
     let i: I64 = 0
     while i + 1 < len(syms) {
-      let r: I64 = rank_of(m, syms[i], syms[i + 1])
-      if r >= 0 and (best_rank < 0 or r < best_rank) {
-        best_rank = r
-        bi = i
+      match rank_of(m, syms[i], syms[i + 1]) {
+        Some(r) => best = keep_better(best, r, i),
+        None => unit,
       }
       i = i + 1
     }
-    if bi < 0 {
-      merging = false
-    } else {
-      syms = apply_merge(syms, syms[bi], syms[bi + 1])
+    match best {
+      None => merging = false,
+      Some(b) => syms = apply_merge(syms, syms[b.at], syms[b.at + 1]),
     }
   }
   syms
+}
+
+# The best-ranked pair found so far, and where it is.
+#
+# One value and not two. `best_rank` and `bi` were a correlated pair kept in
+# step by hand -- `bi < 0` had to mean `best_rank < 0` and nothing enforced it
+# -- and each carried its own -1. As one `Opt[Best]` the two cannot disagree,
+# and "no pair in this word has a rank" is spelled once, as `None`, in the one
+# place that acts on it.
+struct Best {
+  rank: I64,
+  at: I64,
+}
+
+# Ties go to the earlier position, because the comparison is strict. That
+# matches the old code and it matters: two occurrences of the same pair have the
+# same rank, and merging the leftmost first is what makes encoding deterministic.
+fn keep_better(best: Opt[Best], r: I64, at: I64) -> Opt[Best] {
+  match best {
+    None => Some(Best { rank: r, at: at }),
+    Some(b) => if r < b.rank { Some(Best { rank: r, at: at }) } else { best },
+  }
 }
 
 # Encode the whole normalised string, producing pieces with spans in it.
@@ -437,11 +460,14 @@ fn load_merges(s: Str, out: Bpe) -> Str {
       }
       let ha: Str = text.slice(ls[i], 0, sp)
       let hb: Str = text.slice(ls[i], sp + 1, len(ls[i]))
-      if not vocab.hex_ok(ha) or not vocab.hex_ok(hb) {
-        return "bpe.load_merges: line " + str(i + 1) + ": symbols must be even-length hex"
+      let a: Str = match vocab.from_hex(ha) {
+        Some(x) => x,
+        None => return "bpe.load_merges: line " + str(i + 1) + ": symbols must be even-length hex",
       }
-      let a: Str = vocab.from_hex(ha)
-      let b: Str = vocab.from_hex(hb)
+      let b: Str = match vocab.from_hex(hb) {
+        Some(x) => x,
+        None => return "bpe.load_merges: line " + str(i + 1) + ": symbols must be even-length hex",
+      }
       let k: Str = pair_key(a, b)
       if dict_has(out.rank, k) {
         return "bpe.load_merges: line " + str(i + 1) + ": this pair already has a rank"

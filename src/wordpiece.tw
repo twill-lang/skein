@@ -79,29 +79,45 @@ fn encode_word(m: WordPiece, s: Str, a: I64, b: I64, out: pieces.Pieces) {
 
   let got: pieces.Pieces = pieces.new_pieces()
   let ci: I64 = 0
-  while ci < nchars {
-    # Longest first: start at the end of the word and shorten.
-    let cj: I64 = nchars
-    let hit: I64 = -1
-    while cj > ci and hit < 0 {
-      let piece: Str = text.slice(w, starts[ci], starts[cj])
-      if ci > 0 {
-        piece = m.cont + piece
-      }
-      if vocab.contains(m.v, piece) {
-        hit = cj
-        pieces.add(got, piece, a + starts[ci], a + starts[cj])
-      }
-      cj = cj - 1
-    }
-    if hit < 0 {
+  let failed: Bool = false
+  while ci < nchars and not failed {
+    match longest_piece(m, w, starts, ci, nchars, a, got) {
+      Some(cj) => ci = cj,
       # No prefix of the remainder is in the vocabulary. All or nothing.
-      pieces.add(out, m.unk, a, b)
-      return
+      None => failed = true,
     }
-    ci = hit
+  }
+  if failed {
+    pieces.add(out, m.unk, a, b)
+    return
   }
   pieces.extend(out, got)
+}
+
+# The character boundary after the longest in-vocabulary piece starting at `ci`,
+# or `None` when no prefix of the remainder is in the vocabulary. The piece is
+# appended to `got` on the way.
+#
+# Pulled out of `encode_word`'s inner loop, where it was a `hit` initialised to
+# -1 doing two jobs: the answer, and the flag that stopped the scan. Those are
+# now the return value and the `return`, so the loop condition is the loop's
+# actual bound and the -1 has nothing left to mean.
+fn longest_piece(m: WordPiece, w: Str, starts: Arr[I64], ci: I64, nchars: I64,
+                 a: I64, got: pieces.Pieces) -> Opt[I64] {
+  # Longest first: start at the end of the word and shorten.
+  let cj: I64 = nchars
+  while cj > ci {
+    let piece: Str = text.slice(w, starts[ci], starts[cj])
+    if ci > 0 {
+      piece = m.cont + piece
+    }
+    if vocab.contains(m.v, piece) {
+      pieces.add(got, piece, a + starts[ci], a + starts[cj])
+      return Some(cj)
+    }
+    cj = cj - 1
+  }
+  None
 }
 
 fn encode(m: WordPiece, s: Str, p: pretok.PreTok) -> pieces.Pieces {
@@ -138,19 +154,26 @@ fn ids(m: WordPiece, p: pieces.Pieces) -> Arr[I64] {
 # tokens. This is for reading test output and for a decoder that is willing to
 # put a space between words, which is what every WordPiece decoder does and is
 # why WordPiece models are not used where exact reconstruction matters.
+#
+# Built into a `Bytes` rather than by `+` in the loop. Every `+` on a `Str`
+# copies the whole left side, so joining n tokens that way is quadratic in the
+# length of the result: a 512-token sequence copies about 130,000 bytes to
+# produce 2,000. This is not the hot path -- it is a decoder -- but the builder
+# is the same number of lines and the quadratic term is invisible until the
+# sequence is long, which is exactly when it is felt.
 fn detokenize(m: WordPiece, toks: Arr[Str]) -> Str {
-  let out: Str = ""
+  let out: Bytes = bytes_new()
   let i: I64 = 0
   while i < len(toks) {
     if text.starts_with(toks[i], m.cont) {
-      out = out + text.trim_prefix(toks[i], m.cont)
+      text.push_str(out, text.trim_prefix(toks[i], m.cont))
     } else {
       if i > 0 {
-        out = out + " "
+        text.push_str(out, " ")
       }
-      out = out + toks[i]
+      text.push_str(out, toks[i])
     }
     i = i + 1
   }
-  out
+  bytes_to_str(out)
 }

@@ -64,24 +64,29 @@ fn size(v: Vocab) -> I64 = len(v.toks)
 # conflating them is how an unknown token silently becomes a legitimate one. A
 # caller that wants the fallback asks for it: `id_or_unk`.
 #
-# `dict_has` is assumed to exist. twill's own NEEDS-22 asks for `Opt[V]` from a
-# dict lookup and `match` on it, which would be better; a bare membership test
-# is the smallest thing that unblocks this file. `docs/needs.md` entry 3.
-fn id_of(v: Vocab, tok: Str) -> I64 {
-  if dict_has(v.ids, tok) {
-    return v.ids[tok]
-  }
-  -1
-}
+# twill's NEEDS-22 asked for `Opt[V]` from a dict lookup and `match` on it, and
+# said a bare membership test was the smallest thing that unblocked this file.
+# 1.6 delivered the real thing, so this is now `dict_get` and returns an
+# `Opt[I64]`. Two changes fall out of it:
+#
+#   The -1 is gone. Id 0 is a real id -- `[PAD]` in every model skein builds --
+#   and -1 was only ever "the id space starts at 0 so I will use the number
+#   below it". A caller who forgets to test it now hears from the checker.
+#
+#   It is one hash of `tok` instead of two. `dict_has` followed by an index
+#   hashed the key twice, and this is on the encoding path of every token in
+#   every document.
+#
+# `id_or_unk` is still the function to call when the fallback is what you want.
+fn id_of(v: Vocab, tok: Str) -> Opt[I64] = dict_get(v.ids, tok)
 
 fn contains(v: Vocab, tok: Str) -> Bool = dict_has(v.ids, tok)
 
 fn id_or_unk(v: Vocab, tok: Str) -> I64 {
-  let id: I64 = id_of(v, tok)
-  if id >= 0 {
-    return id
+  match id_of(v, tok) {
+    Some(id) => id,
+    None => v.unk_id,
   }
-  v.unk_id
 }
 
 # The token for an id, or the empty string when the id is out of range.
@@ -99,9 +104,9 @@ fn token_of(v: Vocab, id: I64) -> Str {
 
 # Append `tok`, or return its existing id. Frequency starts at 0.
 fn add(v: Vocab, tok: Str) -> I64 {
-  let have: I64 = id_of(v, tok)
-  if have >= 0 {
-    return have
+  match id_of(v, tok) {
+    Some(have) => return have,
+    None => unit,
   }
   let id: I64 = len(v.toks)
   push(v.toks, tok)
@@ -125,11 +130,10 @@ fn add_reserved(v: Vocab, toks: Arr[Str], unk: Str) -> Str {
   }
   v.reserved = len(v.toks)
   if len(unk) > 0 {
-    let id: I64 = id_of(v, unk)
-    if id < 0 {
-      return "vocab.add_reserved: unknown token " + unk + " is not among the reserved tokens"
+    match id_of(v, unk) {
+      Some(id) => v.unk_id = id,
+      None => return "vocab.add_reserved: unknown token " + unk + " is not among the reserved tokens",
     }
-    v.unk_id = id
   }
   ""
 }
@@ -367,43 +371,38 @@ fn to_hex(s: Str) -> Str {
   bytes_to_str(b)
 }
 
-# -1 for a character that is not a hex digit, which is how `from_hex` reports
-# corruption without a second return value.
-fn hex_val(c: I64) -> I64 {
-  if c >= 48 and c <= 57 { return c - 48 }
-  if c >= 97 and c <= 102 { return c - 87 }
-  if c >= 65 and c <= 70 { return c - 55 }
-  -1
+# `None` for a character that is not a hex digit.
+fn hex_val(c: I64) -> Opt[I64] {
+  if c >= 48 and c <= 57 { return Some(c - 48) }
+  if c >= 97 and c <= 102 { return Some(c - 87) }
+  if c >= 65 and c <= 70 { return Some(c - 55) }
+  None
 }
 
-# The decoded bytes, or the empty string on any malformed input. The caller
-# distinguishes "decoded to empty" from "was malformed" with `hex_ok`, because
-# the empty token is a legitimate thing to store.
-fn hex_ok(s: Str) -> Bool {
+# The decoded bytes, or `None` on any malformed input.
+#
+# This used to return a `Str` that was empty both for "decoded to empty" and for
+# "was malformed", with a separate `hex_ok` to tell them apart, and every caller
+# had to remember to call it. `Some("")` and `None` are that distinction with
+# nothing to remember, so `hex_ok` is gone and its two callers each lost a line.
+#
+# It is also one pass instead of two. `hex_ok` walked the string checking every
+# digit and `from_hex` then walked it again decoding them; `?` fails out of the
+# single decoding pass at the first bad digit. On a vocabulary file that is one
+# scan of the whole file rather than two.
+fn from_hex(s: Str) -> Opt[Str] {
   if and(len(s), 1) != 0 {
-    return false
-  }
-  let i: I64 = 0
-  while i < len(s) {
-    if hex_val(s[i]) < 0 {
-      return false
-    }
-    i = i + 1
-  }
-  true
-}
-
-fn from_hex(s: Str) -> Str {
-  if not hex_ok(s) {
-    return ""
+    return None
   }
   let b: Bytes = bytes_new()
   let i: I64 = 0
   while i < len(s) {
-    bytes_push(b, shl(hex_val(s[i]), 4) + hex_val(s[i + 1]))
+    let hi: I64 = hex_val(s[i])?
+    let lo: I64 = hex_val(s[i + 1])?
+    bytes_push(b, shl(hi, 4) + lo)
     i = i + 2
   }
-  bytes_to_str(b)
+  Some(bytes_to_str(b))
 }
 
 fn save(v: Vocab) -> Str {
@@ -474,10 +473,10 @@ fn load(s: Str, out: Vocab) -> Str {
         return "vocab.load: line " + str(i + 1) + ": no space between token and frequency"
       }
       let h: Str = text.slice(ls[i], 0, sp)
-      if not hex_ok(h) {
-        return "vocab.load: line " + str(i + 1) + ": token is not an even-length hex string"
+      let tok: Str = match from_hex(h) {
+        Some(x) => x,
+        None => return "vocab.load: line " + str(i + 1) + ": token is not an even-length hex string",
       }
-      let tok: Str = from_hex(h)
       if dict_has(out.ids, tok) {
         return "vocab.load: line " + str(i + 1) + ": duplicate token, id would be ambiguous"
       }

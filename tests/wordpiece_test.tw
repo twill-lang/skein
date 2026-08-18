@@ -102,8 +102,8 @@ fn ids_come_back_for_every_piece() {
   let p: pc.Pieces = wp.encode(m, "playing", pt.whitespace("playing"))
   let ids: Arr[I64] = wp.ids(m, p)
   t.equal_i64("two ids", len(ids), 2)
-  t.equal_i64("play", ids[0], vb.id_of(v, "play"))
-  t.equal_i64("##ing", ids[1], vb.id_of(v, "##ing"))
+  t.equal_opt_i64("play", Some(ids[0]), vb.id_of(v, "play"))
+  t.equal_opt_i64("##ing", Some(ids[1]), vb.id_of(v, "##ing"))
 }
 
 fn detokenising_joins_continuations_and_spaces_words() {

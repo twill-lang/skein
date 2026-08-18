@@ -6,6 +6,18 @@ import "../src/normalize.tw" as nm
 import "../src/vocab.tw" as vb
 import "../src/pieces.tw" as pc
 import "../src/pretok.tw" as pt
+
+# The id of a token this test has just put in the vocabulary.
+#
+# `abort` and not a fallback. If a fixture token is missing, the assertion below
+# would otherwise silently measure a different piece, and a test that passes
+# against the wrong token is worse than one that stops.
+fn must_id(v: vb.Vocab, tok: Str) -> I64 {
+  match vb.id_of(v, tok) {
+    Some(id) => id,
+    None => abort("test fixture: '" + tok + "' is not in the vocabulary"),
+  }
+}
 import "../src/simple.tw" as sp
 
 fn fixture_vocab(words: Arr[Str]) -> vb.Vocab {
@@ -48,7 +60,7 @@ fn a_special_token_has_an_empty_span_and_not_a_zero_width_one() {
   let v: vb.Vocab = fixture_vocab(["hello"])
   let s: enc.Specials = fixture_specials(v)
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))
-  let e: enc.Encoding = enc.build_single(n, p, v, s, 0, enc.TRUNC_RIGHT)
+  let e: enc.Encoding = enc.build_single(n, p, v, s, 0, enc.TruncRight)
   t.equal_i64("three tokens", enc.length(e), 3)
   t.equal_str("the first is CLS", e.tokens[0], "[CLS]")
   t.equal_i64("its start is -1", e.starts[0], -1)
@@ -67,7 +79,7 @@ fn truncation_leaves_room_for_the_special_tokens() {
   let v: vb.Vocab = fixture_vocab(["a", "b", "c", "d", "e"])
   let s: enc.Specials = fixture_specials(v)
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))
-  let e: enc.Encoding = enc.build_single(n, p, v, s, 4, enc.TRUNC_RIGHT)
+  let e: enc.Encoding = enc.build_single(n, p, v, s, 4, enc.TruncRight)
   t.equal_i64("exactly four tokens", enc.length(e), 4)
   t.equal_str("CLS first", e.tokens[0], "[CLS]")
   t.equal_str("two body tokens", e.tokens[1], "a")
@@ -82,7 +94,7 @@ fn left_truncation_keeps_the_end_of_the_sequence() {
   let v: vb.Vocab = fixture_vocab(["a", "b", "c", "d", "e"])
   let s: enc.Specials = fixture_specials(v)
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))
-  let e: enc.Encoding = enc.build_single(n, p, v, s, 4, enc.TRUNC_LEFT)
+  let e: enc.Encoding = enc.build_single(n, p, v, s, 4, enc.TruncLeft)
   t.equal_str("the last two body tokens survived", e.tokens[1], "d")
   t.equal_str("and the very last", e.tokens[2], "e")
 }
@@ -94,7 +106,7 @@ fn a_truncated_token_keeps_its_own_offset() {
   let v: vb.Vocab = fixture_vocab(["aa", "bb", "cc"])
   let s: enc.Specials = fixture_specials(v)
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))
-  let e: enc.Encoding = enc.build_single(n, p, v, s, 4, enc.TRUNC_LEFT)
+  let e: enc.Encoding = enc.build_single(n, p, v, s, 4, enc.TruncLeft)
   t.equal_str("the surviving tokens still map to their own source text",
               enc.source_text(e, 2, src), "cc")
   t.equal_i64("cc is at source byte 6", e.starts[2], 6)
@@ -109,7 +121,7 @@ fn a_pair_gets_two_type_ids_and_three_specials() {
   nm.apply(nm.spec_default(), "p", nb)
   let pa: pc.Pieces = sp.whitespace(na.text, pt.whitespace(na.text))
   let pb: pc.Pieces = sp.whitespace(nb.text, pt.whitespace(nb.text))
-  let e: enc.Encoding = enc.build_pair(na, pa, nb, pb, v, s, 0, enc.TRUNC_LONGEST_FIRST)
+  let e: enc.Encoding = enc.build_pair(na, pa, nb, pb, v, s, 0, enc.TruncLongestFirst)
   t.equal_i64("CLS q SEP p SEP", enc.length(e), 5)
   t.equal_i64("CLS is segment 0", e.type_ids[0], 0)
   t.equal_i64("q is segment 0", e.type_ids[1], 0)
@@ -128,7 +140,7 @@ fn longest_first_truncation_takes_from_the_longer_sequence() {
   let pa: pc.Pieces = sp.whitespace(na.text, pt.whitespace(na.text))
   let pb: pc.Pieces = sp.whitespace(nb.text, pt.whitespace(nb.text))
   # Budget is 7 minus three specials, so four body tokens.
-  let e: enc.Encoding = enc.build_pair(na, pa, nb, pb, v, s, 7, enc.TRUNC_LONGEST_FIRST)
+  let e: enc.Encoding = enc.build_pair(na, pa, nb, pb, v, s, 7, enc.TruncLongestFirst)
   t.equal_i64("seven tokens", enc.length(e), 7)
   t.equal_str("the one-token query survived whole", e.tokens[1], "q")
   t.equal_str("and the passage lost its tail", e.tokens[3], "a")
@@ -141,13 +153,13 @@ fn padding_marks_the_padded_positions_with_a_zero_mask() {
   let n: nm.Norm = nm.blank()
   nm.apply(nm.spec_default(), "a", n)
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))
-  let e: enc.Encoding = enc.build_single(n, p, v, s, 0, enc.TRUNC_RIGHT)
-  let err: Str = enc.pad_to(e, 5, s, enc.PAD_RIGHT)
+  let e: enc.Encoding = enc.build_single(n, p, v, s, 0, enc.TruncRight)
+  let err: Str = enc.pad_to(e, 5, s, enc.PadRight)
   t.equal_str("padding succeeded", err, "")
   t.equal_i64("five long", enc.length(e), 5)
   t.equal_i64("the real tokens are masked in", e.mask[0], 1)
   t.equal_i64("and the padding is masked out", e.mask[4], 0)
-  t.equal_i64("padding uses the PAD id", e.ids[4], vb.id_of(v, "[PAD]"))
+  t.equal_opt_i64("padding uses the PAD id", Some(e.ids[4]), vb.id_of(v, "[PAD]"))
   t.equal_i64("and carries an empty span", e.starts[4], -1)
 }
 
@@ -157,8 +169,8 @@ fn left_padding_puts_the_padding_first() {
   let n: nm.Norm = nm.blank()
   nm.apply(nm.spec_default(), "a", n)
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))
-  let e: enc.Encoding = enc.build_single(n, p, v, s, 0, enc.TRUNC_RIGHT)
-  enc.pad_to(e, 5, s, enc.PAD_LEFT)
+  let e: enc.Encoding = enc.build_single(n, p, v, s, 0, enc.TruncRight)
+  enc.pad_to(e, 5, s, enc.PadLeft)
   t.equal_i64("five long", enc.length(e), 5)
   t.equal_i64("the first position is padding", e.mask[0], 0)
   t.equal_i64("the last is real", e.mask[4], 1)
@@ -172,7 +184,7 @@ fn padding_without_a_pad_token_is_refused() {
   let e: enc.Encoding = enc.new_encoding()
   enc.push_token(e, 5, "a", 1, 0, 0, 1, false)
   t.check("it returns a message rather than padding with id 0",
-          len(enc.pad_to(e, 4, s, enc.PAD_RIGHT)) > 0)
+          len(enc.pad_to(e, 4, s, enc.PadRight)) > 0)
 }
 
 fn padding_an_already_long_enough_encoding_does_nothing() {
@@ -180,7 +192,7 @@ fn padding_an_already_long_enough_encoding_does_nothing() {
   let s: enc.Specials = fixture_specials(v)
   let e: enc.Encoding = enc.new_encoding()
   enc.push_token(e, 5, "a", 1, 0, 0, 1, false)
-  enc.pad_to(e, 1, s, enc.PAD_RIGHT)
+  enc.pad_to(e, 1, s, enc.PadRight)
   t.equal_i64("still one token", enc.length(e), 1)
 }
 
@@ -196,7 +208,7 @@ fn a_batch_pads_to_its_own_longest_row() {
   enc.batch_add(b, one)
   enc.batch_add(b, two)
   t.equal_i64("the longest row is two", enc.longest(b), 2)
-  t.equal_str("padding succeeded", enc.pad_batch_longest(b, s, enc.PAD_RIGHT), "")
+  t.equal_str("padding succeeded", enc.pad_batch_longest(b, s, enc.PadRight), "")
   t.equal_i64("the short row grew", enc.length(b.items[0]), 2)
   t.equal_i64("one wasted position", enc.pad_waste(b), 1)
 }
@@ -212,7 +224,7 @@ fn an_empty_special_name_means_the_model_does_not_have_one() {
   let v: vb.Vocab = fixture_vocab(["a"])
   let s: enc.Specials = enc.no_specials()
   t.equal_str("no error", enc.specials_from(v, "", "", "[PAD]", "[UNK]", "", s), "")
-  t.equal_i64("CLS is unconfigured", s.cls_id, -1)
+  t.equal_opt_i64("CLS is unconfigured", s.cls_id, None)
   t.equal_i64("and contributes no overhead", enc.overhead_single(s), 0)
 }
 
@@ -227,7 +239,7 @@ fn an_extra_special_is_recognised() {
   let v: vb.Vocab = fixture_vocab(["<lang:en>"])
   let s: enc.Specials = fixture_specials(v)
   t.equal_str("registering succeeded", enc.register_extra(s, v, "<lang:en>"), "")
-  t.check("and it is special now", enc.is_special_id(s, vb.id_of(v, "<lang:en>")))
+  t.check("and it is special now", enc.is_special_id(s, must_id(v, "<lang:en>")))
   t.check("a plain id is not", not enc.is_special_id(s, 99))
 }
 
@@ -238,7 +250,7 @@ fn a_source_span_over_a_range_skips_the_specials() {
   let v: vb.Vocab = fixture_vocab(["aa", "bb"])
   let s: enc.Specials = fixture_specials(v)
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))
-  let e: enc.Encoding = enc.build_single(n, p, v, s, 0, enc.TRUNC_RIGHT)
+  let e: enc.Encoding = enc.build_single(n, p, v, s, 0, enc.TruncRight)
   let got: nm.Span = enc.source_span(e, 0, enc.length(e) - 1)
   t.equal_i64("the span starts at the first real token", got.start, 0)
   t.equal_i64("and ends at the last real one", got.end, 5)

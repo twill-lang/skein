@@ -69,7 +69,7 @@ fn an_absent_token_takes_the_unknown_id() {
   let s: Str = "cat dog"
   let p: pc.Pieces = sp.whitespace(s, pt.whitespace(s))
   let ids: Arr[I64] = sp.ids(v, p)
-  t.equal_i64("cat has its own id", ids[0], vb.id_of(v, "cat"))
+  t.equal_opt_i64("cat has its own id", Some(ids[0]), vb.id_of(v, "cat"))
   t.equal_i64("dog is unknown", ids[1], 0)
 }
 

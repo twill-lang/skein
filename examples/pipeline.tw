@@ -56,7 +56,7 @@ let DOCS: Arr[Str] = [
 fn encode_one(m: bpe.Bpe, sp: enc.Specials, src: Str, out_norm: nm.Norm) -> enc.Encoding {
   nm.apply(nm.spec_default(), src, out_norm)
   let p: pc.Pieces = bpe.encode(m, out_norm.text, pt.whitespace(out_norm.text))
-  enc.build_single(out_norm, p, m.v, sp, MAX_LEN, enc.TRUNC_RIGHT)
+  enc.build_single(out_norm, p, m.v, sp, MAX_LEN, enc.TruncRight)
 }
 
 fn main() {
@@ -89,7 +89,7 @@ fn main() {
     i = i + 1
   }
 
-  let perr: Str = enc.pad_batch_longest(batch, sp, enc.PAD_RIGHT)
+  let perr: Str = enc.pad_batch_longest(batch, sp, enc.PadRight)
   if len(perr) > 0 {
     print("skein: " + perr)
     return

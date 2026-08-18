@@ -57,17 +57,16 @@ end of this.
 **Needs:** `dict_has(d, k) -> Bool`, and a way to iterate a `Dict`'s keys
 **Used by:** `src/vocab.tw` (`id_of`, `contains`, `observe`, `count_of`,
 `load`), `src/bpe.tw` (`rank_of`, `count_pairs`, `load_merges`)
-**Status:** twill's NEEDS-22 asks for `Opt[V]` returned from a dict lookup and
-`match` on it, and twill's NEEDS-8 covers insertion-ordered iteration as a
-property of the type. Neither is implemented. **This entry duplicates NEEDS-22
-and overlaps NEEDS-8.**
+**Status:** the lookup half is RESOLVED in 1.6 (NEEDS-22). Iteration (NEEDS-8)
+is still open.
 
-skein assumes `dict_has` exists. It is the smallest thing that makes a
-dictionary usable at all: without it there is no way to distinguish an absent
-key from a key whose value happens to be the zero of its type, and a token
-counter cannot tell a token it has never seen from one it has seen zero times.
-`Opt[V]` would be better and `dict_has` plus an index is what the source is
-written against today.
+`dict_get` returns `Opt[V]`, which is what this entry said would be better than
+`dict_has` plus an index. `vocab.id_of` and `bpe.rank_of` are both one
+`dict_get` now. That removed their -1 returns, and it also halved their hashing:
+`dict_has` followed by an index hashed the key twice, and those two functions
+are the innermost lookups in the package.
+
+Iteration is still worked around below, unchanged.
 
 Iteration is worked around by keeping a parallel `Arr` of the keys next to every
 `Dict`: `vocab.Counts` has `keys`, `vocab.Vocab` has `toks`. That doubles the
@@ -118,8 +117,18 @@ encodings by definition.
 (`load_merges`), `src/unigram.tw` (`set_logp`, `fit`, `validate`),
 `src/encoding.tw` (`specials_from`, `register_extra`, `pad_to`,
 `pad_batch_longest`), `src/embed.tw` (`check_ids`, `batch_ids`, `batch_mask`)
-**Status:** twill's NEEDS-10 covers `Res[T, E]` and postfix `?`, and NEEDS-4
-covers the generics it needs. **This entry duplicates NEEDS-10.**
+**Status:** AVAILABLE in 1.6 (NEEDS-10), and only partly taken up.
+
+`Res[T, E]`, `Opt[T]` and postfix `?` all exist now. What has been converted so
+far is the `Opt` half, where a function had one thing to return or nothing:
+`vocab.id_of`, `vocab.from_hex` (which also absorbed `hex_ok`, so its callers
+each lost a line and the file is read once instead of twice), `bpe.rank_of`,
+`encoding.lookup` and the `Specials` ids.
+
+The empty-string-means-success convention below is untouched, and converting it
+is a bigger release than this one: it changes the return type of every fallible
+function in the package at once. `src/embed.tw` is the place to start, for the
+reason the last paragraph here gives.
 
 Every fallible function in skein returns a `Str` that is empty on success, which
 is spool's and loom's convention and has their problem: the compiler does not
@@ -232,16 +241,23 @@ import the library under test to build their inputs.
 **Would improve:** `src/encoding.tw` (`TRUNC_RIGHT`, `TRUNC_LEFT`,
 `TRUNC_LONGEST_FIRST`, `PAD_RIGHT`, `PAD_LEFT`, and the if-chains in
 `build_single` and `build_pair`), `src/pretok.tw` (the choice of pre-tokeniser)
-**Status:** twill's NEEDS-3 covers it. **This entry duplicates NEEDS-3.**
+**Status:** RESOLVED in 1.6, which shipped NEEDS-3.
 
-Five I64 constants in this repository are enums wearing a disguise. Each has the
-same failure mode: adding a strategy compiles, and the if-chain that dispatches
-on it silently takes the else branch. `build_single` treats every unrecognised
-strategy as `TRUNC_RIGHT`, so a caller who passes `TRUNC_LONGEST_FIRST` to the
-single-sequence path gets right truncation and no message. That is a real bug
-that exhaustive `match` would have made a compile error, and it is left in
-rather than defended against because defending against it means a runtime check
-per call for a mistake the type system should catch.
+The five constants are now two enums, `Trunc` and `Pad`. The four copies of
+`if strategy == TRUNC_LEFT { left } else { right }` collapsed into one
+`truncate_one`, which holds the file's single exhaustive `match` on `Trunc`, and
+`pad_to` dispatches through a `match` on `Pad`.
+
+One thing this did not fix, and it is worth recording because the entry
+predicted it would. `build_single` given `TruncLongestFirst` still right-
+truncates: there is only one sequence and nothing for longest-first to balance
+against. What changed is that this is now a written-out arm with a reason beside
+it rather than an `else` nobody chose, and a fourth strategy makes
+`truncate_one` a compile error instead of quietly joining the same `else`.
+
+`src/pretok.tw`'s choice of pre-tokeniser is still not an enum; callers select
+one by calling `whitespace`, `word_punct` or `whole` directly, so there is no
+tag to dispatch on and nothing to make exhaustive.
 
 ### 13. A priority queue, or a language reason not to want one
 

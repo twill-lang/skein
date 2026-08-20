@@ -24,7 +24,7 @@ fn refusal(r: Res[vb.Vocab, Str]) -> Str {
 fn reserved_tokens_take_the_lowest_ids() {
   let v: vb.Vocab = vb.new_vocab()
   let r: Arr[Str] = ["[PAD]", "[UNK]", "[CLS]"]
-  let err: Str = vb.add_reserved(v, r, "[UNK]")
+  let err: Str = refusal(vb.add_reserved(v, r, "[UNK]"))
   t.equal_str("reserving succeeded", err, "")
   t.equal_opt_i64("PAD is id 0", vb.id_of(v, "[PAD]"), Some(0))
   t.equal_opt_i64("UNK is id 1", vb.id_of(v, "[UNK]"), Some(1))
@@ -39,13 +39,13 @@ fn reserving_into_a_non_empty_vocabulary_is_refused() {
   let v: vb.Vocab = vb.new_vocab()
   vb.add(v, "word")
   let r: Arr[Str] = ["[PAD]"]
-  t.check("it returns a message", len(vb.add_reserved(v, r, "")) > 0)
+  t.check("it returns a message", len(refusal(vb.add_reserved(v, r, ""))) > 0)
 }
 
 fn naming_an_unknown_token_that_is_not_reserved_is_refused() {
   let v: vb.Vocab = vb.new_vocab()
   let r: Arr[Str] = ["[PAD]"]
-  t.check("it returns a message", len(vb.add_reserved(v, r, "[UNK]")) > 0)
+  t.check("it returns a message", len(refusal(vb.add_reserved(v, r, "[UNK]"))) > 0)
 }
 
 fn an_absent_token_reads_as_minus_one_and_not_as_the_unknown_id() {

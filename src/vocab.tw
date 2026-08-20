@@ -119,9 +119,9 @@ fn add(v: Vocab, tok: Str) -> I64 {
 # empty vocabulary, because reserved means "at the front" and adding them later
 # would give them ids above learned tokens, which is the thing the header argues
 # against.
-fn add_reserved(v: Vocab, toks: Arr[Str], unk: Str) -> Str {
+fn add_reserved(v: Vocab, toks: Arr[Str], unk: Str) -> Res[Unit, Str] {
   if len(v.toks) != 0 {
-    return "vocab.add_reserved: reserved tokens must be added to an empty vocabulary"
+    return Err("vocab.add_reserved: reserved tokens must be added to an empty vocabulary")
   }
   let i: I64 = 0
   while i < len(toks) {
@@ -132,10 +132,10 @@ fn add_reserved(v: Vocab, toks: Arr[Str], unk: Str) -> Str {
   if len(unk) > 0 {
     match id_of(v, unk) {
       Some(id) => v.unk_id = id,
-      None => return "vocab.add_reserved: unknown token " + unk + " is not among the reserved tokens",
+      None => return Err("vocab.add_reserved: unknown token " + unk + " is not among the reserved tokens"),
     }
   }
-  ""
+  Ok(unit)
 }
 
 fn is_reserved(v: Vocab, id: I64) -> Bool = id >= 0 and id < v.reserved

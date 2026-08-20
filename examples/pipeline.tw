@@ -102,10 +102,12 @@ fn main() {
     i = i + 1
   }
 
-  let perr: Str = enc.pad_batch_longest(batch, sp, enc.PadRight)
-  if len(perr) > 0 {
-    print("skein: " + perr)
-    return
+  match enc.pad_batch_longest(batch, sp, enc.PadRight) {
+    Ok(_) => unit,
+    Err(msg) => {
+      print("skein: " + msg)
+      return
+    },
   }
   print("batch: " + str(enc.batch_size(batch)) + " rows of " +
         str(enc.longest(batch)) + ", " + str(enc.pad_waste(batch)) +

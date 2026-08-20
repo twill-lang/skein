@@ -125,13 +125,13 @@ fn copy_token(dst: Encoding, src: Encoding, i: I64) {
 
 # The invariant every function here maintains. Cheap, and it catches the one
 # class of bug a parallel-array representation has.
-fn assert_shape(e: Encoding) -> Str {
+fn assert_shape(e: Encoding) -> Res[Unit, Str] {
   let n: I64 = len(e.ids)
   if len(e.tokens) != n or len(e.mask) != n or len(e.type_ids) != n
      or len(e.starts) != n or len(e.ends) != n or len(e.special) != n {
-    return "encoding: the parallel arrays have different lengths, which means a token was appended to some of them and not all"
+    return Err("encoding: the parallel arrays have different lengths, which means a token was appended to some of them and not all")
   }
-  ""
+  Ok(unit)
 }
 
 # ---- the special token registry ---------------------------------------------
@@ -235,12 +235,12 @@ fn specials_from(v: vocab.Vocab, cls: Str, sep: Str, pad: Str, unk: Str,
   })
 }
 
-fn register_extra(sp: Specials, v: vocab.Vocab, tok: Str) -> Str {
+fn register_extra(sp: Specials, v: vocab.Vocab, tok: Str) -> Res[Unit, Str] {
   match vocab.id_of(v, tok) {
     Some(id) => push(sp.extra, id),
-    None => return "encoding.register_extra: '" + tok + "' is not in the vocabulary",
+    None => return Err("encoding.register_extra: '" + tok + "' is not in the vocabulary"),
   }
-  ""
+  Ok(unit)
 }
 
 fn is_special_id(sp: Specials, id: I64) -> Bool {
@@ -533,20 +533,24 @@ enum Pad { PadRight, PadLeft }
 # batch of unequal lengths gives the same result as running each row alone. A
 # padding token with mask 1 is the single most expensive one-character bug in
 # this area, because the model trains happily and learns to predict `[PAD]`.
-fn pad_to(e: Encoding, width: I64, sp: Specials, side: Pad) -> Str {
+fn pad_to(e: Encoding, width: I64, sp: Specials, side: Pad) -> Res[Unit, Str] {
   let pad_id: I64 = match sp.pad_id {
     Some(id) => id,
-    None => return "encoding.pad_to: no padding token is configured, and padding with an arbitrary id would insert a real word",
+    None => return Err("encoding.pad_to: no padding token is configured, and padding with an arbitrary id would insert a real word"),
   }
   let need: I64 = width - length(e)
   if need <= 0 {
-    return ""
+    # Already at least this wide: nothing to do, and that is a success. Under
+    # the old convention this was `return ""`, which is the same bytes as the
+    # success at the bottom of the function and told a reader nothing about
+    # which it was.
+    return Ok(unit)
   }
   match side {
     PadLeft => pad_left_in_place(e, need, pad_id, sp.pad),
     PadRight => pad_right_in_place(e, need, pad_id, sp.pad),
   }
-  ""
+  Ok(unit)
 }
 
 # Left padding rebuilds the encoding, because the pads go in front and the
@@ -616,29 +620,23 @@ fn longest(b: Batch) -> I64 {
 # batch of 32 tweets padded to 512 is 15 times the arithmetic for the same
 # result. Bucketing by length before batching makes this much better still, and
 # that is `src/sequence.tw`.
-fn pad_batch_longest(b: Batch, sp: Specials, side: Pad) -> Str {
+fn pad_batch_longest(b: Batch, sp: Specials, side: Pad) -> Res[Unit, Str] {
   let w: I64 = longest(b)
   let i: I64 = 0
   while i < len(b.items) {
-    let err: Str = pad_to(b.items[i], w, sp, side)
-    if len(err) > 0 {
-      return err
-    }
+    pad_to(b.items[i], w, sp, side)?
     i = i + 1
   }
-  ""
+  Ok(unit)
 }
 
-fn pad_batch_fixed(b: Batch, width: I64, sp: Specials, side: Pad) -> Str {
+fn pad_batch_fixed(b: Batch, width: I64, sp: Specials, side: Pad) -> Res[Unit, Str] {
   let i: I64 = 0
   while i < len(b.items) {
-    let err: Str = pad_to(b.items[i], width, sp, side)
-    if len(err) > 0 {
-      return err
-    }
+    pad_to(b.items[i], width, sp, side)?
     i = i + 1
   }
-  ""
+  Ok(unit)
 }
 
 # How many padding positions the batch carries, and how many real ones.

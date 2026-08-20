@@ -6,6 +6,18 @@ import "../src/vocab.tw" as vb
 import "../src/pieces.tw" as pc
 import "../src/pretok.tw" as pt
 
+# The refusal message from a result that is expected to carry one, and "" from a
+# success. The functions these assertions call return `Res[Unit, Str]` now
+# rather than a string that is empty on success, and this keeps each assertion
+# saying what it said before.
+fn refusal(r: Res[Unit, Str]) -> Str {
+  match r {
+    Err(msg) => msg,
+    Ok(_) => "",
+  }
+}
+
+
 
 # The id of a token this test has just put in the vocabulary.
 #
@@ -117,7 +129,7 @@ fn fitting_from_counts_gives_relative_frequencies() {
   let c: vb.Counts = vb.new_counts()
   vb.observe(c, "a", 3)
   vb.observe(c, "b", 1)
-  let err: Str = ug.fit(m, c)
+  let err: Str = refusal(ug.fit(m, c))
   t.equal_str("it fitted", err, "")
   t.near("a is log 0.75", ug.logp_of(m, must_id(v, "a")), f64_log(0.75), 0.000000000001)
   t.near("b is log 0.25", ug.logp_of(m, must_id(v, "b")), f64_log(0.25), 0.000000000001)
@@ -135,14 +147,14 @@ fn a_piece_with_no_count_gets_the_unknown_score() {
 fn fitting_from_empty_counts_is_refused() {
   let v: vb.Vocab = build(["a"])
   let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -20.0)
-  t.check("it returns a message", len(ug.fit(m, vb.new_counts())) > 0)
+  t.check("it returns a message", len(refusal(ug.fit(m, vb.new_counts()))) > 0)
 }
 
 fn a_positive_log_probability_is_refused() {
   let v: vb.Vocab = build(["a"])
   let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -20.0)
   ug.set_logp(m, "a", 0.5)
-  t.check("validate objects", len(ug.validate(m)) > 0)
+  t.check("validate objects", len(refusal(ug.validate(m))) > 0)
 }
 
 fn a_piece_longer_than_the_lattice_window_is_refused() {
@@ -150,13 +162,13 @@ fn a_piece_longer_than_the_lattice_window_is_refused() {
   let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -20.0)
   ug.set_logp(m, "abcdefghijklmnopqrstuvwxyz", -1.0)
   m.max_piece_bytes = 4
-  t.check("validate objects", len(ug.validate(m)) > 0)
+  t.check("validate objects", len(refusal(ug.validate(m))) > 0)
 }
 
 fn setting_a_score_for_a_token_that_is_not_there_is_refused() {
   let v: vb.Vocab = build(["a"])
   let m: ug.Unigram = ug.new_unigram(v, "[UNK]", -20.0)
-  t.check("it returns a message", len(ug.set_logp(m, "q", -1.0)) > 0)
+  t.check("it returns a message", len(refusal(ug.set_logp(m, "q", -1.0))) > 0)
 }
 
 fn the_word_score_is_the_sum_of_the_chosen_pieces() {

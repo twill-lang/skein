@@ -110,10 +110,13 @@ while i < len(DOCS) {
     Err(msg) => { print("skein: " + msg); return },
   }
   let p: pc.Pieces = bpe.encode(m, n.text, pt.whitespace(n.text))
-  enc.batch_add(batch, enc.build_single(n, p, m.v, sp, 16, enc.TRUNC_RIGHT))
+  enc.batch_add(batch, enc.build_single(n, p, m.v, sp, 16, enc.TruncRight))
   i = i + 1
 }
-enc.pad_batch_longest(batch, sp, enc.PAD_RIGHT)
+match enc.pad_batch_longest(batch, sp, enc.PadRight) {
+  Ok(_) => unit,
+  Err(msg) => { print("skein: " + msg); return },
+}
 
 # The offsets point into DOCS[1], capitals and double spaces and all.
 let e: enc.Encoding = batch.items[1]

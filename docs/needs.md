@@ -152,14 +152,31 @@ could not also return an error, which made the check a separate
 `check_encoding` stays, for a caller validating a batch before embedding any of
 it.
 
-**What is left, and why it is not the same problem.** `encoding.register_extra`,
-`pad_to`, `pad_batch_longest`, `pad_batch_fixed`, `unigram.set_logp`, `fit`,
-`validate`, `embed.check_ids` and `encoding.assert_shape` still return a `Str`
-that is empty on success. None of them has a value to return alongside it: they
-mutate in place or they are pure checks, so there is no out-parameter and no
-half-built value for a caller to read. Moving them to `Res[Unit, Str]` is
-tidier and is worth doing, but it buys a type rather than removing a way to be
-wrong, which is what the six above did.
+**Nothing is left.** The nine that had no value to return alongside the error --
+`encoding.assert_shape`, `register_extra`, `pad_to`, `pad_batch_longest`,
+`pad_batch_fixed`, `unigram.set_logp`, `fit`, `validate` and `embed.check_ids`
+-- have moved too, along with `embed.check_encoding` and `vocab.add_reserved`,
+which the earlier list had missed. Every fallible function in skein returns a
+`Res` now, and the empty-string-means-success convention is gone from the
+package.
+
+Two functions still return `""` and are not this: `encoding.source_text` and
+`vocab.token_of` return a string as their answer, and `token_of` returning `""`
+for an out-of-range id is a deliberate choice with its reason in the comment
+above it -- a model emitting a nonsense argmax during early training should
+produce a visibly blank token rather than kill the process.
+
+**One thing the conversion itself found.** `pad_to` opened with
+
+    let need: I64 = width - length(e)
+    if need <= 0 { return "" }
+
+which is an early *success* -- already at least this wide, nothing to do -- and
+under the old convention it was the same two bytes as the success at the bottom
+of the function. Nothing in the type or the text said which it was, and a
+mechanical reading of "returns a Str, empty on success" gets it wrong in the
+direction that turns a no-op into a failure. It is `Ok(unit)` now and says so.
+That the distinction was invisible is the argument for the whole entry.
 
 ### 6. A function type, for the tokeniser seam
 

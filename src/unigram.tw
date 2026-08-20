@@ -95,12 +95,12 @@ fn new_unigram(v: vocab.Vocab, unk: Str, unk_logp: F64) -> Unigram {
   Unigram { v: v, logp: lp, unk: unk, unk_logp: unk_logp, max_piece_bytes: 16 }
 }
 
-fn set_logp(m: Unigram, tok: Str, lp: F64) -> Str {
+fn set_logp(m: Unigram, tok: Str, lp: F64) -> Res[Unit, Str] {
   match vocab.id_of(m.v, tok) {
     Some(id) => m.logp[id] = lp,
-    None => return "unigram.set_logp: '" + tok + "' is not in the vocabulary",
+    None => return Err("unigram.set_logp: '" + tok + "' is not in the vocabulary"),
   }
-  ""
+  Ok(unit)
 }
 
 fn logp_of(m: Unigram, id: I64) -> F64 {
@@ -126,9 +126,9 @@ fn logp_of(m: Unigram, id: I64) -> F64 {
 # from the lattice would be the other defensible choice and it makes the model's
 # behaviour depend on a count that may be zero only because the corpus was
 # small.
-fn fit(m: Unigram, c: vocab.Counts) -> Str {
+fn fit(m: Unigram, c: vocab.Counts) -> Res[Unit, Str] {
   if c.total <= 0 {
-    return "unigram.fit: the counts are empty, every log probability would be undefined"
+    return Err("unigram.fit: the counts are empty, every log probability would be undefined")
   }
   let total: F64 = f64_of_i64(c.total)
   let i: I64 = 0
@@ -141,11 +141,11 @@ fn fit(m: Unigram, c: vocab.Counts) -> Str {
     }
     i = i + 1
   }
-  ""
+  Ok(unit)
 }
 
 # Checks the two invariants the Viterbi assumes.
-fn validate(m: Unigram) -> Str {
+fn validate(m: Unigram) -> Res[Unit, Str] {
   let i: I64 = 0
   let longest: I64 = 0
   while i < vocab.size(m.v) {
@@ -154,16 +154,16 @@ fn validate(m: Unigram) -> Str {
       longest = len(t)
     }
     if m.logp[i] > 0.0 {
-      return "unigram.validate: '" + t + "' has a positive log probability, which is a probability above 1"
+      return Err("unigram.validate: '" + t + "' has a positive log probability, which is a probability above 1")
     }
     i = i + 1
   }
   if longest > m.max_piece_bytes {
-    return "unigram.validate: max_piece_bytes is " + str(m.max_piece_bytes) +
+    return Err("unigram.validate: max_piece_bytes is " + str(m.max_piece_bytes) +
            " but the vocabulary contains a piece of " + str(longest) +
-           " bytes, which the lattice would never reach"
+           " bytes, which the lattice would never reach")
   }
-  ""
+  Ok(unit)
 }
 
 # ---- the Viterbi ------------------------------------------------------------

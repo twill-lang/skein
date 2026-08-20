@@ -20,6 +20,18 @@ fn must_id(v: vb.Vocab, tok: Str) -> I64 {
 }
 import "../src/simple.tw" as sp
 
+# The refusal message from a result that is expected to carry one, and "" from a
+# success. The functions these assertions call return `Res[Unit, Str]` now
+# rather than a string that is empty on success, and this keeps each assertion
+# saying what it said before.
+fn refusal(r: Res[Unit, Str]) -> Str {
+  match r {
+    Err(msg) => msg,
+    Ok(_) => "",
+  }
+}
+
+
 # `specials_from` returns a `Res` now: it refuses a name that is not in the
 # vocabulary rather than filling in a `Specials` that is quietly wrong.
 fn specials(r: Res[enc.Specials, Str]) -> enc.Specials {
@@ -172,7 +184,7 @@ fn padding_marks_the_padded_positions_with_a_zero_mask() {
   let n: nm.Norm = normalised(nm.apply(nm.spec_default(), "a"))
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))
   let e: enc.Encoding = enc.build_single(n, p, v, s, 0, enc.TruncRight)
-  let err: Str = enc.pad_to(e, 5, s, enc.PadRight)
+  let err: Str = refusal(enc.pad_to(e, 5, s, enc.PadRight))
   t.equal_str("padding succeeded", err, "")
   t.equal_i64("five long", enc.length(e), 5)
   t.equal_i64("the real tokens are masked in", e.mask[0], 1)
@@ -200,7 +212,7 @@ fn padding_without_a_pad_token_is_refused() {
   let e: enc.Encoding = enc.new_encoding()
   enc.push_token(e, 5, "a", 1, 0, 0, 1, false)
   t.check("it returns a message rather than padding with id 0",
-          len(enc.pad_to(e, 4, s, enc.PadRight)) > 0)
+          len(refusal(enc.pad_to(e, 4, s, enc.PadRight))) > 0)
 }
 
 fn padding_an_already_long_enough_encoding_does_nothing() {
@@ -224,7 +236,7 @@ fn a_batch_pads_to_its_own_longest_row() {
   enc.batch_add(b, one)
   enc.batch_add(b, two)
   t.equal_i64("the longest row is two", enc.longest(b), 2)
-  t.equal_str("padding succeeded", enc.pad_batch_longest(b, s, enc.PadRight), "")
+  t.equal_str("padding succeeded", refusal(enc.pad_batch_longest(b, s, enc.PadRight)), "")
   t.equal_i64("the short row grew", enc.length(b.items[0]), 2)
   t.equal_i64("one wasted position", enc.pad_waste(b), 1)
 }
@@ -254,7 +266,7 @@ fn the_overhead_counts_wrapping_tokens_and_not_replacements() {
 fn an_extra_special_is_recognised() {
   let v: vb.Vocab = fixture_vocab(["<lang:en>"])
   let s: enc.Specials = fixture_specials(v)
-  t.equal_str("registering succeeded", enc.register_extra(s, v, "<lang:en>"), "")
+  t.equal_str("registering succeeded", refusal(enc.register_extra(s, v, "<lang:en>")), "")
   t.check("and it is special now", enc.is_special_id(s, must_id(v, "<lang:en>")))
   t.check("a plain id is not", not enc.is_special_id(s, 99))
 }
@@ -293,7 +305,7 @@ fn the_parallel_arrays_stay_the_same_length() {
   let e: enc.Encoding = enc.new_encoding()
   enc.push_token(e, 1, "a", 1, 0, 0, 1, false)
   enc.push_token(e, 2, "b", 1, 0, 1, 2, false)
-  t.equal_str("the shape holds", enc.assert_shape(e), "")
+  t.equal_str("the shape holds", refusal(enc.assert_shape(e)), "")
 }
 
 an_offset_points_into_the_source_and_not_the_normalised_string()

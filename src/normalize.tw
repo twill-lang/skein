@@ -168,16 +168,16 @@ fn spec_cased() -> NormSpec =
 
 # Run the spec over `s`.
 #
-# Returns the error string, empty on success, and writes the result through
-# `out`. This is the house convention (`src/encoding.tw` and spool both use it)
-# because the subset has neither `Res[T, E]` nor multiple returns;
-# `docs/needs.md` entry 8.
-#
-# `out` is a struct and structs have reference semantics, so writing its fields
-# is visible to the caller. That is the same mechanism `apply_into` below uses.
-fn apply(spec: NormSpec, s: Str, out: Norm) -> Str {
+# Returns the normalised text and its offset traces, or the reason it could not
+# produce them. This used to return the error string and write the result
+# through an `out: Norm` parameter the caller had to build with `blank()` first,
+# because the subset had neither `Res[T, E]` nor multiple returns
+# (`docs/needs.md` entry 8). It has `Res` now, and the out-parameter and the
+# empty value that fed it are both gone: there is no half-built `Norm` for a
+# caller to read when the spec was refused.
+fn apply(spec: NormSpec, s: Str) -> Res[Norm, Str] {
   if spec.nfc {
-    return "normalize.apply: NFC is not implemented and is not approximated; see the header of src/normalize.tw and docs/needs.md entry 1"
+    return Err("normalize.apply: NFC is not implemented and is not approximated; see the header of src/normalize.tw and docs/needs.md entry 1")
   }
   let n: Norm = identity(s)
   if spec.strip_control {
@@ -195,18 +195,7 @@ fn apply(spec: NormSpec, s: Str, out: Norm) -> Str {
   if spec.trim_ends {
     n = trim_ends(n)
   }
-  out.text = n.text
-  out.starts = n.starts
-  out.ends = n.ends
-  out.source = n.source
-  ""
-}
-
-# An empty `Norm` to pass to `apply` as its out-parameter.
-fn blank() -> Norm {
-  let st: Arr[I64] = []
-  let en: Arr[I64] = []
-  Norm { text: "", starts: st, ends: en, source: "" }
+  Ok(n)
 }
 
 # ---- the steps -------------------------------------------------------------

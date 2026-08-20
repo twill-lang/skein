@@ -3,13 +3,25 @@ mode systems
 import "harness.tw" as t
 import "../src/normalize.tw" as nm
 
+# The `Norm` a normalisation is expected to produce. `apply` returns a
+# `Res[Norm, Str]` since the spec it is given may be one it refuses, and a
+# refusal here is the test's own setup being wrong rather than the property
+# under test, so it aborts with the message.
+fn normalised(r: Res[nm.Norm, Str]) -> nm.Norm {
+  match r {
+    Ok(n) => n,
+    Err(msg) => abort("the test could not normalise: " + msg),
+  }
+}
+
+
 # The test the whole package exists for. "Hello   World" collapses to
 # "hello world", so the normalised offset of "World" is 6 and its source offset
 # is 8. A normaliser without a trace reports 6, which is the "o" of "Hello".
 fn an_offset_survives_whitespace_collapsing() {
-  let n: nm.Norm = nm.blank()
-  let err: Str = nm.apply(nm.spec_default(), "Hello   World", n)
-  t.equal_str("the spec was accepted", err, "")
+  # `normalised` aborts on a refusal, so reaching the next line is the
+  # assertion that the spec was accepted.
+  let n: nm.Norm = normalised(nm.apply(nm.spec_default(), "Hello   World"))
   t.equal_str("the normalised text", n.text, "hello world")
   let s: nm.Span = nm.map_span(n, 6, 11)
   t.equal_i64("World starts at source byte 8", s.start, 8)
@@ -17,8 +29,7 @@ fn an_offset_survives_whitespace_collapsing() {
 }
 
 fn the_collapsed_space_spans_the_whole_run_it_replaced() {
-  let n: nm.Norm = nm.blank()
-  nm.apply(nm.spec_default(), "a\t\n\n  b", n)
+  let n: nm.Norm = normalised(nm.apply(nm.spec_default(), "a\t\n\n  b"))
   t.equal_str("a run of five whitespace bytes became one", n.text, "a b")
   let s: nm.Span = nm.map_span(n, 1, 2)
   t.equal_i64("the space starts where the run started", s.start, 1)
@@ -26,9 +37,8 @@ fn the_collapsed_space_spans_the_whole_run_it_replaced() {
 }
 
 fn stripping_a_control_character_shifts_every_later_offset() {
-  let n: nm.Norm = nm.blank()
   # A vertical-tab-free string with one 0x07 bell in the middle.
-  nm.apply(nm.spec_cased(), "ab" + chr(7) + "cd", n)
+  let n: nm.Norm = normalised(nm.apply(nm.spec_cased(), "ab" + chr(7) + "cd"))
   t.equal_str("the bell is gone", n.text, "abcd")
   let s: nm.Span = nm.map_span(n, 2, 4)
   t.equal_i64("cd starts at source byte 3", s.start, 3)
@@ -36,20 +46,17 @@ fn stripping_a_control_character_shifts_every_later_offset() {
 }
 
 fn a_c1_control_is_two_bytes_and_is_removed_as_one() {
-  let n: nm.Norm = nm.blank()
-  nm.apply(nm.spec_cased(), "x" + chr(194) + chr(133) + "y", n)
+  let n: nm.Norm = normalised(nm.apply(nm.spec_cased(), "x" + chr(194) + chr(133) + "y"))
   t.equal_str("the C1 pair is gone", n.text, "xy")
   let s: nm.Span = nm.map_span(n, 1, 2)
   t.equal_i64("y is at source byte 3", s.start, 3)
 }
 
 fn ascii_casing_leaves_multibyte_bytes_alone() {
-  let n: nm.Norm = nm.blank()
   # "CAFÉ" with É as U+00C9, two bytes 0xC3 0x89.
-  nm.apply(nm.spec_cased(), "CAF" + chr(195) + chr(137), n)
+  let n: nm.Norm = normalised(nm.apply(nm.spec_cased(), "CAF" + chr(195) + chr(137)))
   t.equal_i64("cased spec kept five bytes", nm.norm_len(n), 5)
-  let m: nm.Norm = nm.blank()
-  nm.apply(nm.spec_default(), "CAF" + chr(195) + chr(137), m)
+  let m: nm.Norm = normalised(nm.apply(nm.spec_default(), "CAF" + chr(195) + chr(137)))
   t.equal_i64("lowercasing did not change the byte count", nm.norm_len(m), 5)
   t.equal_i64("the accented character was not touched", m.text[3], 195)
   t.equal_i64("nor its continuation byte", m.text[4], 137)
@@ -58,9 +65,8 @@ fn ascii_casing_leaves_multibyte_bytes_alone() {
 fn latin1_folding_can_lengthen_and_the_trace_still_points_at_one_character() {
   let spec: nm.NormSpec = nm.spec_none()
   spec.fold_latin1 = true
-  let n: nm.Norm = nm.blank()
   # "straße": the sharp s is U+00DF, two bytes 0xC3 0x9F, folding to "ss".
-  nm.apply(spec, "stra" + chr(195) + chr(159) + "e", n)
+  let n: nm.Norm = normalised(nm.apply(spec, "stra" + chr(195) + chr(159) + "e"))
   t.equal_str("the sharp s became two ASCII bytes", n.text, "strasse")
   let first: nm.Span = nm.map_span(n, 4, 5)
   let second: nm.Span = nm.map_span(n, 5, 6)
@@ -74,23 +80,24 @@ fn folding_runs_before_lowercasing() {
   let spec: nm.NormSpec = nm.spec_none()
   spec.fold_latin1 = true
   spec.lower_ascii = true
-  let n: nm.Norm = nm.blank()
   # U+00C0, capital A with grave, folds to "A" and must then lowercase to "a".
-  nm.apply(spec, chr(195) + chr(128) + "bc", n)
+  let n: nm.Norm = normalised(nm.apply(spec, chr(195) + chr(128) + "bc"))
   t.equal_str("the folded capital was lowercased too", n.text, "abc")
 }
 
 fn nfc_is_refused_and_not_approximated() {
   let spec: nm.NormSpec = nm.spec_default()
   spec.nfc = true
-  let n: nm.Norm = nm.blank()
-  let err: Str = nm.apply(spec, "anything", n)
-  t.check("asking for NFC returns a message", len(err) > 0)
+  # The one call here that is meant to fail, so it takes the Err arm rather
+  # than going through `normalised`, which would abort on it.
+  t.check("asking for NFC returns a message", match nm.apply(spec, "anything") {
+    Err(msg) => len(msg) > 0,
+    Ok(_) => false,
+  })
 }
 
 fn trimming_both_ends_leaves_the_inner_offsets_intact() {
-  let n: nm.Norm = nm.blank()
-  nm.apply(nm.spec_default(), "   middle   ", n)
+  let n: nm.Norm = normalised(nm.apply(nm.spec_default(), "   middle   "))
   t.equal_str("the ends are gone", n.text, "middle")
   let s: nm.Span = nm.map_span(n, 0, 6)
   t.equal_i64("middle starts at source byte 3", s.start, 3)
@@ -98,8 +105,7 @@ fn trimming_both_ends_leaves_the_inner_offsets_intact() {
 }
 
 fn an_empty_span_is_empty_and_not_a_zero_width_span_at_zero() {
-  let n: nm.Norm = nm.blank()
-  nm.apply(nm.spec_default(), "abc", n)
+  let n: nm.Norm = normalised(nm.apply(nm.spec_default(), "abc"))
   let s: nm.Span = nm.map_span(n, 2, 2)
   t.check("an empty normalised range gives an empty span", nm.span_is_empty(s))
   t.equal_i64("and its start is -1", s.start, -1)

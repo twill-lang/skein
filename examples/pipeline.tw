@@ -49,14 +49,21 @@ let DOCS: Arr[Str] = [
 
 # Normalise, pre-tokenise, encode, wrap in specials, truncate.
 #
-# The `Norm` is handed back through `out_norm`, and nothing downstream needs
-# it: the offsets in the encoding are already source offsets. It is returned so
-# this example can print the normalised string next to the source and show that
-# the two really do differ.
-fn encode_one(m: bpe.Bpe, sp: enc.Specials, src: Str, out_norm: nm.Norm) -> enc.Encoding {
-  nm.apply(nm.spec_default(), src, out_norm)
-  let p: pc.Pieces = bpe.encode(m, out_norm.text, pt.whitespace(out_norm.text))
-  enc.build_single(out_norm, p, m.v, sp, MAX_LEN, enc.TruncRight)
+# The `Norm` comes back inside the result, and nothing downstream needs it: the
+# offsets in the encoding are already source offsets. It is carried out so this
+# example can print the normalised string next to the source and show that the
+# two really do differ. It used to be handed back through an `out_norm`
+# parameter the caller allocated first, which is what `nm.apply` returning a
+# `Res` removed.
+struct Encoded {
+  norm: nm.Norm,
+  enc: enc.Encoding,
+}
+
+fn encode_one(m: bpe.Bpe, sp: enc.Specials, src: Str) -> Res[Encoded, Str] {
+  let n: nm.Norm = nm.apply(nm.spec_default(), src)?
+  let p: pc.Pieces = bpe.encode(m, n.text, pt.whitespace(n.text))
+  Ok(Encoded { norm: n, enc: enc.build_single(n, p, m.v, sp, MAX_LEN, enc.TruncRight) })
 }
 
 fn main() {
@@ -82,10 +89,15 @@ fn main() {
   let norms: Arr[nm.Norm] = []
   let i: I64 = 0
   while i < len(DOCS) {
-    let n: nm.Norm = nm.blank()
-    let e: enc.Encoding = encode_one(m, sp, DOCS[i], n)
-    push(norms, n)
-    enc.batch_add(batch, e)
+    let got: Encoded = match encode_one(m, sp, DOCS[i]) {
+      Ok(one) => one,
+      Err(msg) => {
+        print("skein: " + msg)
+        return
+      },
+    }
+    push(norms, got.norm)
+    enc.batch_add(batch, got.enc)
     i = i + 1
   }
 
@@ -127,12 +139,13 @@ fn main() {
   # skein stops here. The table belongs to the model and is allocated by
   # `std/nn`; skein hands over ids and a mask and owns neither.
   let table = em.table(vb.size(m.v), DIM)
-  let cerr: Str = em.check_encoding(batch.items[0], vb.size(m.v))
-  if len(cerr) > 0 {
-    print("skein: " + cerr)
-    return
+  let rows = match em.embed(table, batch.items[0], vb.size(m.v)) {
+    Ok(r) => r,
+    Err(msg) => {
+      print("skein: " + msg)
+      return
+    },
   }
-  let rows = em.embed(table, batch.items[0])
   print("")
   print("embedded row 0: " + str(enc.length(batch.items[0])) + " positions of " + str(DIM))
 

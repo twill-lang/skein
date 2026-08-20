@@ -20,6 +20,18 @@ fn must_id(v: vb.Vocab, tok: Str) -> I64 {
 }
 import "../src/simple.tw" as sp
 
+# The `Norm` a normalisation is expected to produce. `apply` returns a
+# `Res[Norm, Str]` since the spec it is given may be one it refuses, and a
+# refusal here is the test's own setup being wrong rather than the property
+# under test, so it aborts with the message.
+fn normalised(r: Res[nm.Norm, Str]) -> nm.Norm {
+  match r {
+    Ok(n) => n,
+    Err(msg) => abort("the test could not normalise: " + msg),
+  }
+}
+
+
 fn fixture_vocab(words: Arr[Str]) -> vb.Vocab {
   let v: vb.Vocab = vb.new_vocab()
   let r: Arr[Str] = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"]
@@ -42,8 +54,7 @@ fn fixture_specials(v: vb.Vocab) -> enc.Specials {
 # normalised string does not. Every token's offset must point into the source.
 fn an_offset_points_into_the_source_and_not_the_normalised_string() {
   let src: Str = "Hello   World"
-  let n: nm.Norm = nm.blank()
-  nm.apply(nm.spec_default(), src, n)
+  let n: nm.Norm = normalised(nm.apply(nm.spec_default(), src))
   let v: vb.Vocab = fixture_vocab(["hello", "world"])
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))
   let e: enc.Encoding = enc.from_pieces(n, p, v, 0)
@@ -55,8 +66,7 @@ fn an_offset_points_into_the_source_and_not_the_normalised_string() {
 
 fn a_special_token_has_an_empty_span_and_not_a_zero_width_one() {
   let src: Str = "hello"
-  let n: nm.Norm = nm.blank()
-  nm.apply(nm.spec_default(), src, n)
+  let n: nm.Norm = normalised(nm.apply(nm.spec_default(), src))
   let v: vb.Vocab = fixture_vocab(["hello"])
   let s: enc.Specials = fixture_specials(v)
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))
@@ -74,8 +84,7 @@ fn a_special_token_has_an_empty_span_and_not_a_zero_width_one() {
 
 fn truncation_leaves_room_for_the_special_tokens() {
   let src: Str = "a b c d e"
-  let n: nm.Norm = nm.blank()
-  nm.apply(nm.spec_default(), src, n)
+  let n: nm.Norm = normalised(nm.apply(nm.spec_default(), src))
   let v: vb.Vocab = fixture_vocab(["a", "b", "c", "d", "e"])
   let s: enc.Specials = fixture_specials(v)
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))
@@ -89,8 +98,7 @@ fn truncation_leaves_room_for_the_special_tokens() {
 
 fn left_truncation_keeps_the_end_of_the_sequence() {
   let src: Str = "a b c d e"
-  let n: nm.Norm = nm.blank()
-  nm.apply(nm.spec_default(), src, n)
+  let n: nm.Norm = normalised(nm.apply(nm.spec_default(), src))
   let v: vb.Vocab = fixture_vocab(["a", "b", "c", "d", "e"])
   let s: enc.Specials = fixture_specials(v)
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))
@@ -101,8 +109,7 @@ fn left_truncation_keeps_the_end_of_the_sequence() {
 
 fn a_truncated_token_keeps_its_own_offset() {
   let src: Str = "aa bb cc"
-  let n: nm.Norm = nm.blank()
-  nm.apply(nm.spec_default(), src, n)
+  let n: nm.Norm = normalised(nm.apply(nm.spec_default(), src))
   let v: vb.Vocab = fixture_vocab(["aa", "bb", "cc"])
   let s: enc.Specials = fixture_specials(v)
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))
@@ -115,10 +122,8 @@ fn a_truncated_token_keeps_its_own_offset() {
 fn a_pair_gets_two_type_ids_and_three_specials() {
   let v: vb.Vocab = fixture_vocab(["q", "p"])
   let s: enc.Specials = fixture_specials(v)
-  let na: nm.Norm = nm.blank()
-  let nb: nm.Norm = nm.blank()
-  nm.apply(nm.spec_default(), "q", na)
-  nm.apply(nm.spec_default(), "p", nb)
+  let na: nm.Norm = normalised(nm.apply(nm.spec_default(), "q"))
+  let nb: nm.Norm = normalised(nm.apply(nm.spec_default(), "p"))
   let pa: pc.Pieces = sp.whitespace(na.text, pt.whitespace(na.text))
   let pb: pc.Pieces = sp.whitespace(nb.text, pt.whitespace(nb.text))
   let e: enc.Encoding = enc.build_pair(na, pa, nb, pb, v, s, 0, enc.TruncLongestFirst)
@@ -133,10 +138,8 @@ fn a_pair_gets_two_type_ids_and_three_specials() {
 fn longest_first_truncation_takes_from_the_longer_sequence() {
   let v: vb.Vocab = fixture_vocab(["a", "b", "c", "d", "e", "q"])
   let s: enc.Specials = fixture_specials(v)
-  let na: nm.Norm = nm.blank()
-  let nb: nm.Norm = nm.blank()
-  nm.apply(nm.spec_default(), "q", na)
-  nm.apply(nm.spec_default(), "a b c d e", nb)
+  let na: nm.Norm = normalised(nm.apply(nm.spec_default(), "q"))
+  let nb: nm.Norm = normalised(nm.apply(nm.spec_default(), "a b c d e"))
   let pa: pc.Pieces = sp.whitespace(na.text, pt.whitespace(na.text))
   let pb: pc.Pieces = sp.whitespace(nb.text, pt.whitespace(nb.text))
   # Budget is 7 minus three specials, so four body tokens.
@@ -150,8 +153,7 @@ fn longest_first_truncation_takes_from_the_longer_sequence() {
 fn padding_marks_the_padded_positions_with_a_zero_mask() {
   let v: vb.Vocab = fixture_vocab(["a"])
   let s: enc.Specials = fixture_specials(v)
-  let n: nm.Norm = nm.blank()
-  nm.apply(nm.spec_default(), "a", n)
+  let n: nm.Norm = normalised(nm.apply(nm.spec_default(), "a"))
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))
   let e: enc.Encoding = enc.build_single(n, p, v, s, 0, enc.TruncRight)
   let err: Str = enc.pad_to(e, 5, s, enc.PadRight)
@@ -166,8 +168,7 @@ fn padding_marks_the_padded_positions_with_a_zero_mask() {
 fn left_padding_puts_the_padding_first() {
   let v: vb.Vocab = fixture_vocab(["a"])
   let s: enc.Specials = fixture_specials(v)
-  let n: nm.Norm = nm.blank()
-  nm.apply(nm.spec_default(), "a", n)
+  let n: nm.Norm = normalised(nm.apply(nm.spec_default(), "a"))
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))
   let e: enc.Encoding = enc.build_single(n, p, v, s, 0, enc.TruncRight)
   enc.pad_to(e, 5, s, enc.PadLeft)
@@ -245,8 +246,7 @@ fn an_extra_special_is_recognised() {
 
 fn a_source_span_over_a_range_skips_the_specials() {
   let src: Str = "aa bb"
-  let n: nm.Norm = nm.blank()
-  nm.apply(nm.spec_default(), src, n)
+  let n: nm.Norm = normalised(nm.apply(nm.spec_default(), src))
   let v: vb.Vocab = fixture_vocab(["aa", "bb"])
   let s: enc.Specials = fixture_specials(v)
   let p: pc.Pieces = sp.whitespace(n.text, pt.whitespace(n.text))

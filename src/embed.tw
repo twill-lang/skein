@@ -149,13 +149,25 @@ fn table(vocab_size: I64, dim: I64) = nn.embedding_params(vocab_size, dim)
 # widening warning in the checker). skein narrows nothing and widens nothing; the
 # table's dtype is the model's decision and it flows straight through.
 #
-# The check is a separate call rather than folded in here, because this function
-# has to return a tensor and the house error convention returns a `Str`, and a
-# function cannot do both (`docs/needs.md` entry 8). So the contract is: call
-# `check_encoding` once per encoding, then call this. `examples/pipeline.tw`
-# shows the pair.
-fn embed(p, e: encoding.Encoding) = nn.embedding(p, ids_of(e))
+# The ids are checked here rather than by a call the caller has to remember.
+#
+# This used to be a pair: `check_encoding` first, then `embed`, because a
+# function returning a tensor could not also return an error and the house
+# convention returned a `Str` (`docs/needs.md` entry 8). "Call this other
+# function first" is exactly the API shape the rest of this library argues
+# against, and it was here only because there was no alternative. `Res` is the
+# alternative, so an unchecked embedding is no longer reachable: an id of -1 or
+# one past the end of the table stops here instead of indexing whatever row it
+# lands on.
+fn embed(p, e: encoding.Encoding, vocab_size: I64) -> Res[Tensor, Str] {
+  let bad: Str = check_ids(ids_of(e), vocab_size)
+  if len(bad) > 0 {
+    return Err(bad)
+  }
+  Ok(nn.embedding(p, ids_of(e)))
+}
 
-# The check `embed` cannot make for itself.
+# The same check on its own, for a caller that wants to validate a batch of
+# encodings before embedding any of them.
 fn check_encoding(e: encoding.Encoding, vocab_size: I64) -> Str =
   check_ids(ids_of(e), vocab_size)

@@ -124,9 +124,10 @@ while k < enc.length(e) {
 
 # skein stops at ids. The table belongs to the model.
 let table = em.table(vb.size(m.v), 64)
-let err: Str = em.check_encoding(batch.items[0], vb.size(m.v))
-if len(err) > 0 { print("skein: " + err) }
-let rows = em.embed(table, batch.items[0])
+let rows = match em.embed(table, batch.items[0], vb.size(m.v)) {
+  Ok(r) => r,
+  Err(msg) => { print("skein: " + msg); return },
+}
 ```
 
 Output:

@@ -117,31 +117,37 @@ encodings by definition.
 (`load_merges`), `src/unigram.tw` (`set_logp`, `fit`, `validate`),
 `src/encoding.tw` (`specials_from`, `register_extra`, `pad_to`,
 `pad_batch_longest`), `src/embed.tw` (`check_ids`, `batch_ids`, `batch_mask`)
-**Status:** AVAILABLE in 1.6 (NEEDS-10), and only partly taken up.
+**Status:** the two cases this entry called the worst are done (2026-08, on
+twill 1.7); the rest of the empty-string convention is still there and is a
+smaller thing than it was.
 
-`Res[T, E]`, `Opt[T]` and postfix `?` all exist now. What has been converted so
-far is the `Opt` half, where a function had one thing to return or nothing:
-`vocab.id_of`, `vocab.from_hex` (which also absorbed `hex_ok`, so its callers
-each lost a line and the file is read once instead of twice), `bpe.rank_of`,
-`encoding.lookup` and the `Specials` ids.
+`Res[T, E]`, `Opt[T]` and postfix `?` all exist. The `Opt` half was converted
+first, where a function had one thing to return or nothing: `vocab.id_of`,
+`vocab.from_hex` (which also absorbed `hex_ok`, so its callers each lost a line
+and the file is read once instead of twice), `bpe.rank_of`, `encoding.lookup`
+and the `Specials` ids.
 
-The empty-string-means-success convention below is untouched, and converting it
-is a bigger release than this one: it changes the return type of every fallible
-function in the package at once. `src/embed.tw` is the place to start, for the
-reason the last paragraph here gives.
+**`normalize.apply` was the worst case and is fixed.** It had to return both a
+normalised string and an error, so the string went out through an `out: Norm`
+parameter the caller allocated with `blank()` first and the return was the
+error. It is `Res[Norm, Str]` now; `blank()` is deleted, and there is no
+half-built `Norm` for a caller to read when the spec was refused.
 
-Every fallible function in skein returns a `Str` that is empty on success, which
-is spool's and loom's convention and has their problem: the compiler does not
-make anyone read it. `normalize.apply` is the worst case, because it must return
-both a normalised string and an error, so the string is written through an
-out-parameter struct and the return is the error. `vocab.load`,
-`bpe.load_merges` and `encoding.specials_from` all have the same shape and all
-require the caller to construct an empty value first and pass it in.
+**`embed` was the sharpest and is fixed.** It returned a tensor and so could not
+also return an error, which made the check a separate `check_encoding` call the
+caller had to remember -- and this entry said that is "exactly the API shape
+this library exists to argue against elsewhere, and it is here because there is
+no alternative". There is an alternative. `embed(p, e, vocab_size)` returns
+`Res[Tensor, Str]` and does the check itself, so an id of -1 or one past the end
+of the table stops there instead of indexing whatever row it lands on.
+`check_encoding` stays, for a caller validating a batch before embedding any of
+it.
 
-`src/embed.tw` shows the cost most sharply. `embed` returns a tensor and cannot
-also return an error, so the check is a separate function the caller has to
-remember to call. That is exactly the API shape this library exists to argue
-against elsewhere, and it is here because there is no alternative.
+**What is left.** `vocab.load`, `bpe.load_merges` and `encoding.specials_from`
+still return an empty string on success and still take the value to fill as a
+parameter. They are the same shape as `normalize.apply` was and the same fix
+applies; nothing blocks it now, and it is a mechanical change rather than a
+design question.
 
 ### 6. A function type, for the tokeniser seam
 

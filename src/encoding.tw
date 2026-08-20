@@ -214,31 +214,25 @@ fn lookup(v: vocab.Vocab, tok: Str) -> Opt[I64] {
 # defers the failure to the first batch that needs padding, which is typically
 # in a training loop at three in the morning.
 fn specials_from(v: vocab.Vocab, cls: Str, sep: Str, pad: Str, unk: Str,
-                 msk: Str, out: Specials) -> Str {
+                 msk: Str) -> Res[Specials, Str] {
   let names: Arr[Str] = [cls, sep, pad, unk, msk]
   let i: I64 = 0
   while i < len(names) {
     if len(names[i]) > 0 {
       match vocab.id_of(v, names[i]) {
         Some(_) => unit,
-        None => return "encoding.specials_from: '" + names[i] + "' is not in the vocabulary",
+        None => return Err("encoding.specials_from: '" + names[i] + "' is not in the vocabulary"),
       }
     }
     i = i + 1
   }
-  out.cls = cls
-  out.sep = sep
-  out.pad = pad
-  out.unk = unk
-  out.msk = msk
-  out.cls_id = lookup(v, cls)
-  out.sep_id = lookup(v, sep)
-  out.pad_id = lookup(v, pad)
-  out.unk_id = lookup(v, unk)
-  out.msk_id = lookup(v, msk)
   let x: Arr[I64] = []
-  out.extra = x
-  ""
+  Ok(Specials {
+    cls: cls, sep: sep, pad: pad, unk: unk, msk: msk,
+    cls_id: lookup(v, cls), sep_id: lookup(v, sep), pad_id: lookup(v, pad),
+    unk_id: lookup(v, unk), msk_id: lookup(v, msk),
+    extra: x,
+  })
 }
 
 fn register_extra(sp: Specials, v: vocab.Vocab, tok: Str) -> Str {

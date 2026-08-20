@@ -77,11 +77,12 @@ fn main() {
         str(bpe.num_merges(m)) + " merges")
 
   # There is no [UNK]: byte-level BPE cannot produce one.
-  let sp: enc.Specials = enc.no_specials()
-  let err: Str = enc.specials_from(m.v, "[CLS]", "[SEP]", "[PAD]", "", "[MASK]", sp)
-  if len(err) > 0 {
-    print("skein: " + err)
-    return
+  let sp: enc.Specials = match enc.specials_from(m.v, "[CLS]", "[SEP]", "[PAD]", "", "[MASK]") {
+    Ok(built) => built,
+    Err(msg) => {
+      print("skein: " + msg)
+      return
+    },
   }
 
   # ---- encode a batch -------------------------------------------------------
@@ -151,8 +152,13 @@ fn main() {
 
   # The mask goes to the attention, not to the embedding. It is fetched here so
   # that the example does not model the mistake of dropping it.
-  let mask: Arr[I64] = []
-  em.batch_mask(batch, mask)
+  let mask: Arr[I64] = match em.batch_mask(batch) {
+    Ok(m) => m,
+    Err(msg) => {
+      print("skein: " + msg)
+      return
+    },
+  }
   print("mask: " + str(len(mask)) + " entries")
 }
 

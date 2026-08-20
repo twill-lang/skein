@@ -9,6 +9,24 @@ import "harness.tw" as t
 import "../src/embed.tw" as em
 import "../src/encoding.tw" as enc
 
+# The flattened array a batch is expected to produce, and the message when it is
+# expected to be refused. `batch_ids` and `batch_mask` return a `Res` now rather
+# than filling an array the caller allocated first.
+fn flattened(r: Res[Arr[I64], Str]) -> Arr[I64] {
+  match r {
+    Ok(xs) => xs,
+    Err(msg) => abort("the test could not flatten a batch: " + msg),
+  }
+}
+
+fn refusal(r: Res[Arr[I64], Str]) -> Str {
+  match r {
+    Err(msg) => msg,
+    Ok(_) => "",
+  }
+}
+
+
 fn row(ids: Arr[I64]) -> enc.Encoding {
   let e: enc.Encoding = enc.new_encoding()
   let i: I64 = 0
@@ -60,8 +78,7 @@ fn a_padded_batch_flattens_row_by_row() {
   let b: enc.Batch = enc.new_batch()
   enc.batch_add(b, row([1, 2]))
   enc.batch_add(b, row([3, 4]))
-  let flat: Arr[I64] = []
-  t.equal_str("it flattened", em.batch_ids(b, flat), "")
+  let flat: Arr[I64] = flattened(em.batch_ids(b))
   t.equal_i64("four ids", len(flat), 4)
   t.equal_i64("row major, first row first", flat[0], 1)
   t.equal_i64("then the rest of row zero", flat[1], 2)
@@ -72,15 +89,12 @@ fn a_ragged_batch_is_refused_rather_than_reshaped() {
   let b: enc.Batch = enc.new_batch()
   enc.batch_add(b, row([1, 2]))
   enc.batch_add(b, row([3]))
-  let flat: Arr[I64] = []
-  t.check("it names the offending row", len(em.batch_ids(b, flat)) > 0)
+  t.check("it names the offending row", len(refusal(em.batch_ids(b))) > 0)
 }
 
 fn an_empty_batch_is_refused() {
-  let flat: Arr[I64] = []
-  t.check("ids", len(em.batch_ids(enc.new_batch(), flat)) > 0)
-  let m: Arr[I64] = []
-  t.check("mask", len(em.batch_mask(enc.new_batch(), m)) > 0)
+  t.check("ids", len(refusal(em.batch_ids(enc.new_batch()))) > 0)
+  t.check("mask", len(refusal(em.batch_mask(enc.new_batch()))) > 0)
 }
 
 fn the_mask_flattens_the_same_way_as_the_ids() {
@@ -89,8 +103,7 @@ fn the_mask_flattens_the_same_way_as_the_ids() {
   one.mask[1] = 0
   enc.batch_add(b, one)
   enc.batch_add(b, row([3, 4]))
-  let m: Arr[I64] = []
-  t.equal_str("it flattened", em.batch_mask(b, m), "")
+  let m: Arr[I64] = flattened(em.batch_mask(b))
   t.equal_i64("four entries", len(m), 4)
   t.equal_i64("the masked-out position", m[1], 0)
   t.equal_i64("and the rest are in", m[2], 1)

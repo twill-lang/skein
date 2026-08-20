@@ -20,6 +20,23 @@ fn must_id(v: vb.Vocab, tok: Str) -> I64 {
 }
 import "../src/simple.tw" as sp
 
+# `specials_from` returns a `Res` now: it refuses a name that is not in the
+# vocabulary rather than filling in a `Specials` that is quietly wrong.
+fn specials(r: Res[enc.Specials, Str]) -> enc.Specials {
+  match r {
+    Ok(sp) => sp,
+    Err(msg) => abort("the test could not build the specials: " + msg),
+  }
+}
+
+fn specials_refusal(r: Res[enc.Specials, Str]) -> Str {
+  match r {
+    Err(msg) => msg,
+    Ok(_) => "",
+  }
+}
+
+
 # The `Norm` a normalisation is expected to produce. `apply` returns a
 # `Res[Norm, Str]` since the spec it is given may be one it refuses, and a
 # refusal here is the test's own setup being wrong rather than the property
@@ -45,8 +62,7 @@ fn fixture_vocab(words: Arr[Str]) -> vb.Vocab {
 }
 
 fn fixture_specials(v: vb.Vocab) -> enc.Specials {
-  let s: enc.Specials = enc.no_specials()
-  enc.specials_from(v, "[CLS]", "[SEP]", "[PAD]", "[UNK]", "[MASK]", s)
+  let s: enc.Specials = specials(enc.specials_from(v, "[CLS]", "[SEP]", "[PAD]", "[UNK]", "[MASK]"))
   s
 }
 
@@ -180,8 +196,7 @@ fn left_padding_puts_the_padding_first() {
 
 fn padding_without_a_pad_token_is_refused() {
   let v: vb.Vocab = fixture_vocab(["a"])
-  let s: enc.Specials = enc.no_specials()
-  enc.specials_from(v, "[CLS]", "[SEP]", "", "[UNK]", "", s)
+  let s: enc.Specials = specials(enc.specials_from(v, "[CLS]", "[SEP]", "", "[UNK]", ""))
   let e: enc.Encoding = enc.new_encoding()
   enc.push_token(e, 5, "a", 1, 0, 0, 1, false)
   t.check("it returns a message rather than padding with id 0",
@@ -216,15 +231,15 @@ fn a_batch_pads_to_its_own_longest_row() {
 
 fn a_special_token_that_is_not_in_the_vocabulary_is_refused() {
   let v: vb.Vocab = fixture_vocab(["a"])
-  let s: enc.Specials = enc.no_specials()
   t.check("it names the token",
-          len(enc.specials_from(v, "[NOPE]", "[SEP]", "[PAD]", "[UNK]", "", s)) > 0)
+          len(specials_refusal(enc.specials_from(v, "[NOPE]", "[SEP]", "[PAD]", "[UNK]", ""))) > 0)
 }
 
 fn an_empty_special_name_means_the_model_does_not_have_one() {
   let v: vb.Vocab = fixture_vocab(["a"])
-  let s: enc.Specials = enc.no_specials()
-  t.equal_str("no error", enc.specials_from(v, "", "", "[PAD]", "[UNK]", "", s), "")
+  # `specials` aborts on a refusal, so reaching the next line is the assertion
+  # that an empty name is accepted rather than reported.
+  let s: enc.Specials = specials(enc.specials_from(v, "", "", "[PAD]", "[UNK]", ""))
   t.equal_opt_i64("CLS is unconfigured", s.cls_id, None)
   t.equal_i64("and contributes no overhead", enc.overhead_single(s), 0)
 }

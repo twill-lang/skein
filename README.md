@@ -97,14 +97,18 @@ let DOCS: Arr[Str] = [
 let reserved: Arr[Str] = ["[PAD]", "[CLS]", "[SEP]", "[MASK]"]
 let m: bpe.Bpe = bpe.train(CORPUS, 400, 2, reserved, true, false)
 
-let sp: enc.Specials = enc.no_specials()
-enc.specials_from(m.v, "[CLS]", "[SEP]", "[PAD]", "", "[MASK]", sp)
+let sp: enc.Specials = match enc.specials_from(m.v, "[CLS]", "[SEP]", "[PAD]", "", "[MASK]") {
+  Ok(built) => built,
+  Err(msg) => { print("skein: " + msg); return },
+}
 
 let batch: enc.Batch = enc.new_batch()
 let i: I64 = 0
 while i < len(DOCS) {
-  let n: nm.Norm = nm.blank()
-  nm.apply(nm.spec_default(), DOCS[i], n)
+  let n: nm.Norm = match nm.apply(nm.spec_default(), DOCS[i]) {
+    Ok(norm) => norm,
+    Err(msg) => { print("skein: " + msg); return },
+  }
   let p: pc.Pieces = bpe.encode(m, n.text, pt.whitespace(n.text))
   enc.batch_add(batch, enc.build_single(n, p, m.v, sp, 16, enc.TRUNC_RIGHT))
   i = i + 1

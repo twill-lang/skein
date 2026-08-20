@@ -3,6 +3,24 @@ mode systems
 import "harness.tw" as t
 import "../src/vocab.tw" as vb
 
+# The value a load is expected to produce, and the message when it is expected
+# to fail. `load` returns a `Res` now, and every assertion below is one of these
+# two shapes.
+fn loaded(r: Res[vb.Vocab, Str]) -> vb.Vocab {
+  match r {
+    Ok(v) => v,
+    Err(msg) => abort("the test could not load a vocabulary: " + msg),
+  }
+}
+
+fn refusal(r: Res[vb.Vocab, Str]) -> Str {
+  match r {
+    Err(msg) => msg,
+    Ok(_) => "",
+  }
+}
+
+
 fn reserved_tokens_take_the_lowest_ids() {
   let v: vb.Vocab = vb.new_vocab()
   let r: Arr[Str] = ["[PAD]", "[UNK]", "[CLS]"]
@@ -150,9 +168,7 @@ fn a_vocabulary_round_trips_through_its_file_format() {
   let v: vb.Vocab = vb.build(c, r, "[UNK]", 1, 0)
   let blob: Str = vb.save(v)
 
-  let w: vb.Vocab = vb.new_vocab()
-  let err: Str = vb.load(blob, w)
-  t.equal_str("it loaded", err, "")
+  let w: vb.Vocab = loaded(vb.load(blob))
   t.equal_i64("the same size", vb.size(w), vb.size(v))
   t.equal_i64("the same reserved count", w.reserved, v.reserved)
   t.equal_i64("the same unknown id", w.unk_id, v.unk_id)
@@ -164,17 +180,17 @@ fn a_vocabulary_round_trips_through_its_file_format() {
 fn a_corrupt_vocabulary_file_names_the_line() {
   let w: vb.Vocab = vb.new_vocab()
   t.check("a bad magic line is refused",
-          len(vb.load("nope\nreserved 0\nunk -1\n", w)) > 0)
+          len(refusal(vb.load("nope\nreserved 0\nunk -1\n"))) > 0)
   t.check("a missing reserved line is refused",
-          len(vb.load("skein-vocab 1\nx\nunk -1\n", w)) > 0)
+          len(refusal(vb.load("skein-vocab 1\nx\nunk -1\n"))) > 0)
   t.check("an odd-length token is refused",
-          len(vb.load("skein-vocab 1\nreserved 0\nunk -1\nabc 1\n", w)) > 0)
+          len(refusal(vb.load("skein-vocab 1\nreserved 0\nunk -1\nabc 1\n"))) > 0)
   t.check("a line with no space is refused",
-          len(vb.load("skein-vocab 1\nreserved 0\nunk -1\n4142\n", w)) > 0)
+          len(refusal(vb.load("skein-vocab 1\nreserved 0\nunk -1\n4142\n"))) > 0)
   t.check("a duplicate token is refused",
-          len(vb.load("skein-vocab 1\nreserved 0\nunk -1\n41 1\n41 2\n", w)) > 0)
+          len(refusal(vb.load("skein-vocab 1\nreserved 0\nunk -1\n41 1\n41 2\n"))) > 0)
   t.check("an unknown id past the end is refused",
-          len(vb.load("skein-vocab 1\nreserved 0\nunk 9\n41 1\n", w)) > 0)
+          len(refusal(vb.load("skein-vocab 1\nreserved 0\nunk 9\n41 1\n"))) > 0)
 }
 
 fn byte_lexicographic_order_puts_a_prefix_first() {

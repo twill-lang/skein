@@ -6,6 +6,23 @@ import "../src/vocab.tw" as vb
 import "../src/pieces.tw" as pc
 import "../src/pretok.tw" as pt
 
+# As in tests/vocab_test.tw: `load_merges` returns a `Res`, and the assertions
+# below are either "this must load" or "this must be refused".
+fn loaded(r: Res[bpe.Bpe, Str]) -> bpe.Bpe {
+  match r {
+    Ok(m) => m,
+    Err(msg) => abort("the test could not load a merge table: " + msg),
+  }
+}
+
+fn refusal(r: Res[bpe.Bpe, Str]) -> Str {
+  match r {
+    Err(msg) => msg,
+    Ok(_) => "",
+  }
+}
+
+
 fn the_base_alphabet_is_every_byte() {
   let docs: Arr[Str] = ["ab"]
   let r: Arr[Str] = []
@@ -159,9 +176,7 @@ fn the_merge_file_round_trips() {
   let r: Arr[Str] = []
   let m: bpe.Bpe = bpe.train(docs, 5, 2, r, true, false)
   let blob: Str = bpe.save_merges(m)
-  let w: bpe.Bpe = bpe.new_bpe(false)
-  let err: Str = bpe.load_merges(blob, w)
-  t.equal_str("it loaded", err, "")
+  let w: bpe.Bpe = loaded(bpe.load_merges(blob))
   t.equal_i64("the same number of merges", bpe.num_merges(w), bpe.num_merges(m))
   t.check("the space prefix flag came back", w.space_prefix)
   t.equal_str("and saving again gives the same bytes", bpe.save_merges(w), blob)
@@ -176,12 +191,12 @@ fn the_merge_file_round_trips() {
 
 fn a_corrupt_merge_file_is_refused() {
   let w: bpe.Bpe = bpe.new_bpe(false)
-  t.check("a bad magic line", len(bpe.load_merges("nope\nspace_prefix 0\n", w)) > 0)
-  t.check("a missing flag line", len(bpe.load_merges("skein-merges 1\nx\n", w)) > 0)
+  t.check("a bad magic line", len(refusal(bpe.load_merges("nope\nspace_prefix 0\n"))) > 0)
+  t.check("a missing flag line", len(refusal(bpe.load_merges("skein-merges 1\nx\n"))) > 0)
   t.check("a line with one symbol",
-          len(bpe.load_merges("skein-merges 1\nspace_prefix 0\n4142\n", w)) > 0)
+          len(refusal(bpe.load_merges("skein-merges 1\nspace_prefix 0\n4142\n"))) > 0)
   t.check("a duplicate pair",
-          len(bpe.load_merges("skein-merges 1\nspace_prefix 0\n41 42\n41 42\n", w)) > 0)
+          len(refusal(bpe.load_merges("skein-merges 1\nspace_prefix 0\n41 42\n41 42\n"))) > 0)
 }
 
 fn punctuation_splitting_stops_a_merge_across_a_comma() {

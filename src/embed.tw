@@ -76,17 +76,18 @@ fn ids_of(e: encoding.Encoding) -> Arr[I64] {
 # would have to be flattened somewhere anyway. The batch must be padded first:
 # a ragged batch has no rectangular shape and reshaping the result would be
 # wrong in a way that produces a valid tensor.
-fn batch_ids(b: encoding.Batch, out: Arr[I64]) -> Str {
+fn batch_ids(b: encoding.Batch) -> Res[Arr[I64], Str] {
+  let out: Arr[I64] = []
   if encoding.batch_size(b) == 0 {
-    return "embed.batch_ids: the batch is empty"
+    return Err("embed.batch_ids: the batch is empty")
   }
   let width: I64 = encoding.length(b.items[0])
   let i: I64 = 0
   while i < encoding.batch_size(b) {
     if encoding.length(b.items[i]) != width {
-      return "embed.batch_ids: row " + str(i) + " has length " +
+      return Err("embed.batch_ids: row " + str(i) + " has length " +
              str(encoding.length(b.items[i])) + " but row 0 has length " + str(width) +
-             "; pad the batch before embedding it"
+             "; pad the batch before embedding it")
     }
     let k: I64 = 0
     while k < width {
@@ -95,7 +96,7 @@ fn batch_ids(b: encoding.Batch, out: Arr[I64]) -> Str {
     }
     i = i + 1
   }
-  ""
+  Ok(out)
 }
 
 # The attention mask of a padded batch, flattened the same way as `batch_ids`.
@@ -105,15 +106,16 @@ fn batch_ids(b: encoding.Batch, out: Arr[I64]) -> Str {
 # mask goes into the attention. A caller that forgets the mask gets a model that
 # attends to padding, and the only defence against that is the mask being an
 # obvious separate thing it has to pass.
-fn batch_mask(b: encoding.Batch, out: Arr[I64]) -> Str {
+fn batch_mask(b: encoding.Batch) -> Res[Arr[I64], Str] {
+  let out: Arr[I64] = []
   if encoding.batch_size(b) == 0 {
-    return "embed.batch_mask: the batch is empty"
+    return Err("embed.batch_mask: the batch is empty")
   }
   let width: I64 = encoding.length(b.items[0])
   let i: I64 = 0
   while i < encoding.batch_size(b) {
     if encoding.length(b.items[i]) != width {
-      return "embed.batch_mask: row " + str(i) + " is not the same length as row 0"
+      return Err("embed.batch_mask: row " + str(i) + " is not the same length as row 0")
     }
     let k: I64 = 0
     while k < width {
@@ -122,7 +124,7 @@ fn batch_mask(b: encoding.Batch, out: Arr[I64]) -> Str {
     }
     i = i + 1
   }
-  ""
+  Ok(out)
 }
 
 # Allocate the table. A thin wrapper that exists so the vocabulary size comes

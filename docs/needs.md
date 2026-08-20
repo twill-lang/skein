@@ -117,37 +117,49 @@ encodings by definition.
 (`load_merges`), `src/unigram.tw` (`set_logp`, `fit`, `validate`),
 `src/encoding.tw` (`specials_from`, `register_extra`, `pad_to`,
 `pad_batch_longest`), `src/embed.tw` (`check_ids`, `batch_ids`, `batch_mask`)
-**Status:** the two cases this entry called the worst are done (2026-08, on
-twill 1.7); the rest of the empty-string convention is still there and is a
-smaller thing than it was.
+**Status:** done for everything this entry named (2026-08, on twill 1.7). The
+out-parameter pattern is gone from the package entirely; a plain
+empty-string-on-success return survives in places where nothing is returned
+alongside it, and that is a different and much smaller thing.
 
-`Res[T, E]`, `Opt[T]` and postfix `?` all exist. The `Opt` half was converted
-first, where a function had one thing to return or nothing: `vocab.id_of`,
+`Res[T, E]`, `Opt[T]` and postfix `?` all exist. The `Opt` half went first,
+where a function had one thing to return or nothing: `vocab.id_of`,
 `vocab.from_hex` (which also absorbed `hex_ok`, so its callers each lost a line
 and the file is read once instead of twice), `bpe.rank_of`, `encoding.lookup`
 and the `Specials` ids.
 
-**`normalize.apply` was the worst case and is fixed.** It had to return both a
-normalised string and an error, so the string went out through an `out: Norm`
-parameter the caller allocated with `blank()` first and the return was the
-error. It is `Res[Norm, Str]` now; `blank()` is deleted, and there is no
-half-built `Norm` for a caller to read when the spec was refused.
+Then the six that had to return a value *and* an error, which is what forced the
+out-parameter:
 
-**`embed` was the sharpest and is fixed.** It returned a tensor and so could not
-also return an error, which made the check a separate `check_encoding` call the
-caller had to remember -- and this entry said that is "exactly the API shape
-this library exists to argue against elsewhere, and it is here because there is
-no alternative". There is an alternative. `embed(p, e, vocab_size)` returns
-`Res[Tensor, Str]` and does the check itself, so an id of -1 or one past the end
-of the table stops there instead of indexing whatever row it lands on.
+| was | is |
+| --- | --- |
+| `normalize.apply(spec, s, out: Norm) -> Str` | `Res[Norm, Str]` |
+| `vocab.load(s, out: Vocab) -> Str` | `Res[Vocab, Str]` |
+| `bpe.load_merges(s, out: Bpe) -> Str` | `Res[Bpe, Str]` |
+| `encoding.specials_from(v, .., out: Specials) -> Str` | `Res[Specials, Str]` |
+| `embed.batch_ids(b, out: Arr[I64]) -> Str` | `Res[Arr[I64], Str]` |
+| `embed.batch_mask(b, out: Arr[I64]) -> Str` | `Res[Arr[I64], Str]` |
+
+Every one of those made the caller allocate a value before knowing whether the
+call would succeed, and then read it without being made to check. `blank()` and
+the other empty constructors that existed only to feed them are deleted.
+
+`embed` was the sharpest case and is also fixed. It returned a tensor and so
+could not also return an error, which made the check a separate
+`check_encoding` call the caller had to remember -- and this entry called that
+"exactly the API shape this library exists to argue against elsewhere". It is
+`embed(p, e, vocab_size) -> Res[Tensor, Str]` now and does the check itself.
 `check_encoding` stays, for a caller validating a batch before embedding any of
 it.
 
-**What is left.** `vocab.load`, `bpe.load_merges` and `encoding.specials_from`
-still return an empty string on success and still take the value to fill as a
-parameter. They are the same shape as `normalize.apply` was and the same fix
-applies; nothing blocks it now, and it is a mechanical change rather than a
-design question.
+**What is left, and why it is not the same problem.** `encoding.register_extra`,
+`pad_to`, `pad_batch_longest`, `pad_batch_fixed`, `unigram.set_logp`, `fit`,
+`validate`, `embed.check_ids` and `encoding.assert_shape` still return a `Str`
+that is empty on success. None of them has a value to return alongside it: they
+mutate in place or they are pure checks, so there is no out-parameter and no
+half-built value for a caller to read. Moving them to `Res[Unit, Str]` is
+tidier and is worth doing, but it buys a type rather than removing a way to be
+wrong, which is what the six above did.
 
 ### 6. A function type, for the tokeniser seam
 

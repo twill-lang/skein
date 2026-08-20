@@ -439,29 +439,24 @@ fn i64_or(s: Str, fallback: I64) -> I64 {
   }
 }
 
-fn load(s: Str, out: Vocab) -> Str {
+fn load(s: Str) -> Res[Vocab, Str] {
   let ls: Arr[Str] = text.lines(s)
   if len(ls) < 3 {
-    return "vocab.load: file has fewer than three header lines"
+    return Err("vocab.load: file has fewer than three header lines")
   }
   if not text.equal(ls[0], "skein-vocab 1") {
-    return "vocab.load: line 1: expected 'skein-vocab 1', got '" + ls[0] + "'"
+    return Err("vocab.load: line 1: expected 'skein-vocab 1', got '" + ls[0] + "'")
   }
   if not text.starts_with(ls[1], "reserved ") {
-    return "vocab.load: line 2: expected 'reserved <n>'"
+    return Err("vocab.load: line 2: expected 'reserved <n>'")
   }
   if not text.starts_with(ls[2], "unk ") {
-    return "vocab.load: line 3: expected 'unk <id>'"
+    return Err("vocab.load: line 3: expected 'unk <id>'")
   }
   let reserved: I64 = i64_or(text.trim_prefix(ls[1], "reserved "), -1)
   let unk: I64 = i64_or(text.trim_prefix(ls[2], "unk "), -1)
 
-  let d: Dict[Str, I64] = {}
-  let t: Arr[Str] = []
-  let f: Arr[I64] = []
-  out.ids = d
-  out.toks = t
-  out.freqs = f
+  let out: Vocab = new_vocab()
   out.reserved = reserved
   out.unk_id = unk
 
@@ -470,15 +465,15 @@ fn load(s: Str, out: Vocab) -> Str {
     if len(ls[i]) > 0 {
       let sp: I64 = text.find(ls[i], " ")
       if sp < 0 {
-        return "vocab.load: line " + str(i + 1) + ": no space between token and frequency"
+        return Err("vocab.load: line " + str(i + 1) + ": no space between token and frequency")
       }
       let h: Str = text.slice(ls[i], 0, sp)
       let tok: Str = match from_hex(h) {
         Some(x) => x,
-        None => return "vocab.load: line " + str(i + 1) + ": token is not an even-length hex string",
+        None => return Err("vocab.load: line " + str(i + 1) + ": token is not an even-length hex string"),
       }
       if dict_has(out.ids, tok) {
-        return "vocab.load: line " + str(i + 1) + ": duplicate token, id would be ambiguous"
+        return Err("vocab.load: line " + str(i + 1) + ": duplicate token, id would be ambiguous")
       }
       let id: I64 = len(out.toks)
       push(out.toks, tok)
@@ -488,10 +483,10 @@ fn load(s: Str, out: Vocab) -> Str {
     i = i + 1
   }
   if unk >= len(out.toks) {
-    return "vocab.load: unknown id " + str(unk) + " is beyond the " + str(len(out.toks)) + " tokens in the file"
+    return Err("vocab.load: unknown id " + str(unk) + " is beyond the " + str(len(out.toks)) + " tokens in the file")
   }
   if reserved > len(out.toks) {
-    return "vocab.load: reserved count " + str(reserved) + " is beyond the " + str(len(out.toks)) + " tokens in the file"
+    return Err("vocab.load: reserved count " + str(reserved) + " is beyond the " + str(len(out.toks)) + " tokens in the file")
   }
-  ""
+  Ok(out)
 }

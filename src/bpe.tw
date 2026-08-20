@@ -433,44 +433,43 @@ fn save_merges(m: Bpe) -> Str {
   bytes_to_str(out)
 }
 
-fn load_merges(s: Str, out: Bpe) -> Str {
+# Read a merge table back. The `Bpe` that comes out carries the merges and the
+# space-prefix flag and an empty vocabulary: a merge file holds neither, and the
+# caller attaches the vocabulary it loaded separately. This used to take the
+# `Bpe` to fill as a parameter, which meant a caller allocated one before
+# knowing whether the file would parse.
+fn load_merges(s: Str) -> Res[Bpe, Str] {
   let ls: Arr[Str] = text.lines(s)
   if len(ls) < 2 {
-    return "bpe.load_merges: file has fewer than two header lines"
+    return Err("bpe.load_merges: file has fewer than two header lines")
   }
   if not text.equal(ls[0], "skein-merges 1") {
-    return "bpe.load_merges: line 1: expected 'skein-merges 1', got '" + ls[0] + "'"
+    return Err("bpe.load_merges: line 1: expected 'skein-merges 1', got '" + ls[0] + "'")
   }
   if not text.starts_with(ls[1], "space_prefix ") {
-    return "bpe.load_merges: line 2: expected 'space_prefix 0' or 'space_prefix 1'"
+    return Err("bpe.load_merges: line 2: expected 'space_prefix 0' or 'space_prefix 1'")
   }
-  out.space_prefix = text.equal(text.trim_prefix(ls[1], "space_prefix "), "1")
-  let l: Arr[Str] = []
-  let r: Arr[Str] = []
-  let d: Dict[Str, I64] = {}
-  out.left = l
-  out.right = r
-  out.rank = d
+  let out: Bpe = new_bpe(text.equal(text.trim_prefix(ls[1], "space_prefix "), "1"))
   let i: I64 = 2
   while i < len(ls) {
     if len(ls[i]) > 0 {
       let sp: I64 = text.find(ls[i], " ")
       if sp < 0 {
-        return "bpe.load_merges: line " + str(i + 1) + ": no space between the two symbols"
+        return Err("bpe.load_merges: line " + str(i + 1) + ": no space between the two symbols")
       }
       let ha: Str = text.slice(ls[i], 0, sp)
       let hb: Str = text.slice(ls[i], sp + 1, len(ls[i]))
       let a: Str = match vocab.from_hex(ha) {
         Some(x) => x,
-        None => return "bpe.load_merges: line " + str(i + 1) + ": symbols must be even-length hex",
+        None => return Err("bpe.load_merges: line " + str(i + 1) + ": symbols must be even-length hex"),
       }
       let b: Str = match vocab.from_hex(hb) {
         Some(x) => x,
-        None => return "bpe.load_merges: line " + str(i + 1) + ": symbols must be even-length hex",
+        None => return Err("bpe.load_merges: line " + str(i + 1) + ": symbols must be even-length hex"),
       }
       let k: Str = pair_key(a, b)
       if dict_has(out.rank, k) {
-        return "bpe.load_merges: line " + str(i + 1) + ": this pair already has a rank"
+        return Err("bpe.load_merges: line " + str(i + 1) + ": this pair already has a rank")
       }
       push(out.left, a)
       push(out.right, b)
@@ -478,5 +477,5 @@ fn load_merges(s: Str, out: Bpe) -> Str {
     }
     i = i + 1
   }
-  ""
+  Ok(out)
 }

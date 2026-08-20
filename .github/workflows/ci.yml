@@ -125,3 +125,12 @@ jobs:
 
       - name: Run the tests
         run: ./twill test tests
+
+      # Checking an example is not the same as running it. `twill check`
+      # follows imports for enum declarations only, so it cannot see a call
+      # into another module whose signature changed -- a stale helper, a `Res`
+      # bound where a `Str` was expected, an entry point that runs twice.
+      # Every one of those was found by running a program and none of them by
+      # checking one.
+      - name: Run the examples
+        run: ./twill run examples/pipeline.tw > /dev/null

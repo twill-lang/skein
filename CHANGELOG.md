@@ -4,9 +4,10 @@
 
 First cut of skein, the text and sequence library for twill, written in twill.
 
-It does not run. twill's `mode systems` is still being built. See
-`docs/needs.md` for what is missing and `README.md` for the status table.
-Nothing below has ever executed.
+It runs on twill 1.7. `twill test tests` is 11 files, 11 passed, 0 failed, and
+`twill run examples/pipeline.tw` exits 0. Everything below has executed. See
+`docs/needs.md` for what the language still owes this library and `README.md`
+for the status table.
 
 Added:
 

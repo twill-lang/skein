@@ -26,12 +26,82 @@ here executed and this section said so. twill 1.6 is the release that closed it:
 the 11 test suites under `tests/` pass, and CI runs them against a released
 twill on every push rather than gating on the prose in this file.
 
+You need twill 1.7.0 or newer. Get a binary from the twill releases; there is
+no build step, because there is nothing here but twill source.
+
+```bash
+curl -fsSL -o twill \
+  https://github.com/twill-lang/twill/releases/download/v1.7.1/twill-v1.7.1-linux-amd64
+chmod +x twill
+./twill --version
+```
+
+The asset name is `twill-v1.7.1-<os>-<arch>`, and the assets that exist for
+v1.7.1 are `linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64` and
+`windows-amd64.exe`. Substitute yours.
+
+Then, from the project root:
+
 ```bash
 twill test tests
 ```
 
-You need twill 1.7.0 or newer. `docs/needs.md` is still worth reading -- it
-is the list of what this library asked the language for, and it now records
+```
+ok    tests\bpe_test.tw
+ok    tests\embed_test.tw
+ok    tests\encoding_test.tw
+ok    tests\normalize_test.tw
+ok    tests\pieces_test.tw
+ok    tests\pretok_test.tw
+ok    tests\sequence_test.tw
+ok    tests\simple_test.tw
+ok    tests\unigram_test.tw
+ok    tests\vocab_test.tw
+ok    tests\wordpiece_test.tw
+
+11 file(s): 11 passed, 0 failed
+```
+
+Then the example, which is the whole library end to end:
+
+```bash
+twill run examples/pipeline.tw
+```
+
+```
+vocabulary: 278 tokens, 18 merges
+batch: 3 rows of 14, 17 padding positions
+
+row 1, normalised: a dog ate the café hat
+row 1, token spans against the source:
+  0..1  'A'
+  1..5  ' dog'
+  5..6  ' '
+  6..8  'at'
+  8..9  'e'
+  9..13  ' the'
+  13..15  ' c'
+  15..16  'a'
+  16..17  'f'
+  17..18  '�'
+  18..19  '�'
+  19..23  ' hat'
+
+row 1 in windows of 6 with an overlap of 2: 3 windows
+
+embedded row 0: 14 positions of 64
+mask: 42 entries
+```
+
+Both output blocks are pasted from a run of twill 1.7.1 on Windows, which is
+where the path separator in the first one comes from. CI runs the same two
+commands on linux-amd64 on every push.
+
+The two tokens at `17..18` and `18..19` are the two bytes of `é` printed one at
+a time, so what you actually see there is whatever your terminal does with half
+a character; mine showed the replacement character twice. The section below says
+why they arrive separately. `docs/needs.md` is still worth reading --
+it is the list of what this library asked the language for, and it records
 which of those arrived and which are still open.
 
 ## What skein is
@@ -41,27 +111,35 @@ operations; `std/nn` gives you an embedding table that takes row indices.
 Nothing in between turns a document into ids, and nothing at all tells you which
 bytes of the document a given id came from. That is skein.
 
+Every row below that says "runs" names the test file that runs it. Nothing in
+this table is a claim about code that has not executed.
+
 | Piece | State |
 | --- | --- |
-| Normalisation with an offset-preserving trace | written, unrun |
-| Byte-level BPE: training and rank-ordered encoding | written, unrun |
-| WordPiece: greedy longest-match with `##` and a whole-word fallback | written, unrun |
-| Unigram: a proper Viterbi over the piece lattice | written, unrun |
-| Whitespace and character tokenisers | written, unrun |
-| Offset mapping through normalisation, specials and truncation | written, unrun |
-| Special tokens, three truncation strategies, padding, batching | written, unrun |
-| n-grams, sliding windows, length bucketing | written, unrun |
-| Vocabulary with cutoffs, caps, reserved ids and a round-trippable file | written, unrun |
+| Normalisation with an offset-preserving trace | runs. `tests/normalize_test.tw` |
+| Byte-level BPE: training and rank-ordered encoding | runs. `tests/bpe_test.tw` |
+| WordPiece: greedy longest-match with `##` and a whole-word fallback | runs. `tests/wordpiece_test.tw` |
+| Unigram: a proper Viterbi over the piece lattice | runs. `tests/unigram_test.tw` |
+| Whitespace and character tokenisers | runs. `tests/simple_test.tw` |
+| Offset mapping through normalisation, specials and truncation | runs. `tests/encoding_test.tw` |
+| Special tokens, three truncation strategies, padding, batching | runs. `tests/encoding_test.tw` |
+| n-grams, sliding windows, length bucketing | runs. `tests/sequence_test.tw` |
+| Vocabulary with cutoffs, caps, reserved ids and a round-trippable format | runs. `tests/vocab_test.tw`. The format is a `Str`; nothing here writes it to disk |
+| The handoff to `std/nn` | runs. `tests/embed_test.tw`, and `examples/pipeline.tw` embeds a real batch |
+| Everything above, end to end | runs. `examples/pipeline.tw`, output above |
 | NFC and NFD | **not possible.** See below |
 | Case folding and punctuation detection outside ASCII | **not possible.** See below |
 | Unigram vocabulary induction by EM pruning | **not in v0.1** |
 | An embedding table | **deliberately not here.** See below |
-| Anything running end to end | **no** |
 
 ## A worked example
 
 Train a byte-level BPE tokeniser, encode a batch with padding and offsets, hand
-the ids to `std/nn`.
+the ids to `std/nn`. Abridged, and written as a consumer would write it, with
+the vendored `twill_modules/` import paths. `examples/pipeline.tw` is the same
+program complete, with its `fn main`, its named constants, its windowing step
+and imports relative to this repository, and it is the file that was run to
+produce the output above.
 
 ```rust
 mode systems
@@ -84,10 +162,12 @@ let CORPUS: Arr[Str] = [
   "a cat and a dog and a hat",
 ]
 
-# Deliberately awkward: a capital, a double space, a multi-byte character.
+# Deliberately awkward: a capital, a double space, a multi-byte character. The
+# accented letter is built with `chr` rather than written literally, so the
+# fixture does not depend on this file's own encoding surviving a diff tool.
 let DOCS: Arr[Str] = [
   "The  cat sat",
-  "A dog ate the café hat",
+  "A dog ate the caf" + chr(195) + chr(169) + " hat",
   "the mat",
 ]
 
@@ -137,34 +217,19 @@ let rows = match em.embed(table, batch.items[0], vb.size(m.v)) {
 }
 ```
 
-Output:
+The output is in the section above, since that is the run of this program.
 
-```
-vocabulary: 322 tokens, 62 merges
-batch: 3 rows of 8, 7 padding positions
-
-row 1, normalised: a dog ate the café hat
-row 1, token spans against the source:
-  0..1   'A'
-  1..5   ' dog'
-  5..9   ' ate'
-  9..13  ' the'
-  13..19 ' café'
-  19..23 ' hat'
-
-row 1 in windows of 6 with an overlap of 2: 2 windows
-
-embedded row 0: 8 positions of 64
-mask: 24 entries
-```
-
-The interesting line is `13..19 ' café'`. Six bytes for five characters, because
-the accented letter is two of them, and that is the source range rather than a
-character count. In this document the normalised offset happens to be 13 too,
-since lowercasing does not change any length; in
-`"A dog ate the CAFÉ  hat"` it would not, and the reported offset would still be
-right.
-`examples/pipeline.tw` is the same program, complete.
+The interesting part is the tail of the accented word. This corpus is five
+sentences, so BPE learns 18 merges and none of them touch `café`, which does not
+appear in the corpus at all; ` café` comes out as five tokens rather than one.
+That is a fact about a toy corpus and not about the offsets. The spans still
+tile: `13..15`, `15..16`, `16..17`, `17..18`, `18..19`, which is bytes 13 to 19
+of the source, six bytes for five characters, because the accented letter is two
+of them. The last two tokens are the two halves of that letter, which is why
+each prints as a replacement character on its own. In this document the
+normalised offset happens to be 13 too, since lowercasing does not change any
+length; in `"A dog ate the CAFÉ  hat"` it would not, and the reported offset
+would still be right.
 
 ## Offset mapping is the headline, and here is the argument
 
@@ -272,11 +337,18 @@ because the vocabulary was rebuilt and the checkpoint was not), and calls
 
 ## Install
 
-Once spool and `mode systems` both work:
+To run the tests or the example, clone the repository and point a twill 1.7
+binary at it; the section at the top has the commands and their output. There is
+no build step.
+
+To use skein from another project, via spool:
 
 ```
 spool add skein https://github.com/twill-lang/skein
 ```
+
+I have not run that command against this repository, so treat it as spool's
+documented usage rather than as something verified here.
 
 spool vendors into `twill_modules/`, and twill's import is a path, so the import
 lines are the long ones in the example above and they resolve relative to the
@@ -298,7 +370,7 @@ src/sequence.tw     n-grams, sliding windows, length bucketing
 src/embed.tw        the handoff to std/nn, and the two checks at that boundary
 tests/              tests, named as sentences
 examples/           a complete pipeline, corpus to embedding
-docs/needs.md       what the language still has to provide
+docs/needs.md       what this library asked the language for, and what arrived
 ```
 
 ## Dependencies
@@ -312,12 +384,16 @@ reimplemented anywhere here.
 
 ## Contributing
 
-The most useful contribution right now is not code. It is a correction to
-[`docs/needs.md`](docs/needs.md): a feature listed there that the language
-already has, a workaround that is worse than described, a cross-reference to a
-twill `NEEDS-N` that is wrong or missing, or a new entry found by reading the
-source. After that, the offset-mapping argument above is the part most worth
-arguing with.
+The most useful contributions right now are the three entries in
+[`docs/needs.md`](docs/needs.md) marked "delivered, not wired up": twill has
+`dict_keys`, function values and `continue`, and skein still runs the workaround
+for each. Entry 10 is a fourth of the same shape, smaller.
+
+After that, a correction to `docs/needs.md` itself: a feature listed there that
+the language already has, a workaround that is worse than described, a
+cross-reference to a twill `NEEDS-N` that is wrong or missing, or a new entry
+found by reading the source. Then the offset-mapping argument above, which is
+the part most worth arguing with.
 
 ## License
 

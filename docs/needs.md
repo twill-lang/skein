@@ -1,14 +1,39 @@
 # What skein needs from twill
 
-skein is written in twill and does not run yet. This file is the reason: the
-language, runtime and data features the source uses that twill does not provide
-today, with the file and function that needs each one, and what skein does in
-the meantime.
+skein is written in twill and it runs: `twill test tests` is 11 files, 11
+passed, and `twill run examples/pipeline.tw` exits 0 on twill 1.7.1. This file
+started as the reason it did not. It is now the record of what this library
+asked the language for, entry by entry, and which of those arrived.
+
+Each entry says one of three things. **Delivered and used** means twill ships it
+and skein calls it. **Delivered, not wired up** means twill ships it and skein
+still runs the workaround, which is skein's debt and not the language's. **Open**
+means the language still does not have it.
 
 It is a work queue for the language, not a complaint. Every entry was reached by
 writing real code and hitting the wall, which is the only way a list like this
 is worth anything. Where skein has a workaround the workaround is described,
 because how ugly a workaround is measures how badly the feature is wanted.
+
+| # | Entry | State |
+| --- | --- | --- |
+| 1 | Unicode character database | open |
+| 2 | `Dict` membership and iteration | delivered, iteration not wired up |
+| 3 | Sorting with a caller-supplied comparison | open |
+| 4 | Nested containers | delivered and used |
+| 5 | `Res[T, E]` | delivered and used |
+| 6 | A function type | delivered, not wired up |
+| 7 | Integer division and modulo | delivered |
+| 8 | `f64_log` and the float conversions | delivered and used |
+| 9 | `str()` on `I64`, string concatenation | delivered and used |
+| 10 | `i64_of_str` | delivered, the `Opt` not fully used |
+| 11 | `chr(n)` | delivered and used |
+| 12 | `enum` with payloads and exhaustive `match` | delivered and used |
+| 13 | A priority queue for BPE training | skein's own debt |
+| 14 | Unigram training and not only estimation | skein's own debt |
+| 15 | `continue` | delivered, not wired up |
+| 16 | A test runner | delivered and used |
+| 17 | A tensor from an `Arr[I64]` | delivered; a dtype seam is left |
 
 The baseline is milestone 1 of `docs/self-hosting.md` in the twill repository:
 `mode systems`, `I64` with bitwise operations, `Str` with length and byte
@@ -21,7 +46,7 @@ anything. Duplicates are kept rather than deleted: a second repository hitting
 the same wall for a different reason is evidence about priority, and deleting
 the entry throws that evidence away.
 
-## Blocking: skein cannot run at all without these
+## Was blocking: skein could not run at all without these
 
 ### 1. A Unicode character database, or an honest replacement for one
 
@@ -29,7 +54,8 @@ the entry throws that evidence away.
 combining classes and composition exclusions, and general category data
 **Used by:** `src/normalize.tw` (`apply`, `fold_latin1`, `latin1_fold`),
 `src/pretok.tw` (`is_punct`)
-**Status:** nothing in the language or the standard library. `std/text.tw` has
+**Status:** OPEN. Nothing in the language or the standard library on 1.7.1;
+there is no `nfc` and no character-database builtin. `std/text.tw` has
 UTF-8 decoding (`char_starts`, `char_size`, `char_code`) and no tables at all,
 and says so in its own header.
 
@@ -57,8 +83,12 @@ end of this.
 **Needs:** `dict_has(d, k) -> Bool`, and a way to iterate a `Dict`'s keys
 **Used by:** `src/vocab.tw` (`id_of`, `contains`, `observe`, `count_of`,
 `load`), `src/bpe.tw` (`rank_of`, `count_pairs`, `load_merges`)
-**Status:** the lookup half is RESOLVED in 1.6 (NEEDS-22). Iteration (NEEDS-8)
-is still open.
+**Status:** DELIVERED, and the iteration half is NOT WIRED UP. The lookup half
+was resolved in 1.6 (NEEDS-22) and skein uses it. Iteration (NEEDS-8) arrived
+too: 1.7.1 has `dict_keys(d)`, which returns the keys as an `Arr`. There is
+still no `for` over a `Dict` itself. No file in `src/` calls `dict_keys`, so
+every parallel key array described below is still there and is now skein's debt
+rather than the language's.
 
 `dict_get` returns `Opt[V]`, which is what this entry said would be better than
 `dict_has` plus an index. `vocab.id_of` and `bpe.rank_of` are both one
@@ -66,7 +96,7 @@ is still open.
 `dict_has` followed by an index hashed the key twice, and those two functions
 are the innermost lookups in the package.
 
-Iteration is still worked around below, unchanged.
+Iteration is worked around below, and the workaround is no longer forced.
 
 Iteration is worked around by keeping a parallel `Arr` of the keys next to every
 `Dict`: `vocab.Counts` has `keys`, `vocab.Vocab` has `toks`. That doubles the
@@ -75,14 +105,25 @@ array and the dictionary can disagree and nothing checks that they do not.
 `vocab.observe` is the only function allowed to write either, which is how the
 invariant is kept, and it is kept by discipline rather than by the type.
 
+Removing the parallel arrays is not a mechanical substitution of `dict_keys`,
+which is why it has not happened yet. The arrays carry insertion order, and
+`vocab.build` assigns ids from that order so that a vocabulary is a function of
+the data alone; `dict_keys` is not documented to return keys in insertion order
+and skein has not established that it does. Whoever does this has to check that
+first, and `tests/vocab_test.tw` has the assertions that would catch it.
+
 ### 3. Sorting
 
 **Needs:** a sort over `Arr[T]` with a caller-supplied comparison
 **Used by:** `src/vocab.tw` (`sort_index`, called by `build`),
 `src/sequence.tw` (`sort_by_length`, called by `bucket`)
-**Status:** twill's NEEDS-23 asks for sorting an `Arr[Str]`. **This entry
-duplicates NEEDS-23** and widens it: skein needs a comparison over two parallel
-arrays, not over the elements of one.
+**Status:** OPEN. 1.7.1 has `sort`, which refuses a list whose elements are not
+strings ("sort on a list expects every element to be a string") and takes no
+comparison function; there is no `sort_by`. NEEDS-23 asked for sorting an
+`Arr[Str]` and that is what shipped. **This entry duplicates NEEDS-23** and
+widens it, and the widening is the part still missing: skein needs a comparison
+over two parallel arrays, not over the elements of one, so neither of the two
+sorts below can be deleted.
 
 skein has written two sorts. `vocab.sort_index` is a bottom-up merge sort over
 an index array, because a vocabulary is tens of thousands of entries and it has
@@ -101,10 +142,13 @@ between runs.
 **Used by:** `src/bpe.tw` (`train`, `count_pairs`, the `words` inventory),
 `src/encoding.tw` (`Batch.items` is `Arr[Encoding]`), `src/sequence.tw`
 (`bucket` takes `Arr[Encoding]` and returns `Arr[Batch]`)
-**Status:** twill's NEEDS-72 covers nested containers. **This entry duplicates
-NEEDS-72.**
+**Status:** DELIVERED AND USED. `Arr[Arr[Str]]` and an `Arr` of structs both
+work on 1.7.1, `bpe.train`, `encoding.Batch` and `sequence.bucket` are written
+against them as described, and `tests/bpe_test.tw`, `tests/encoding_test.tw` and
+`tests/sequence_test.tw` exercise all three. NEEDS-72 is closed as far as skein
+is concerned. The rest of this entry is the record of why it mattered.
 
-There is no workaround. BPE training holds every distinct word as its current
+There was no workaround. BPE training holds every distinct word as its current
 symbol list and rewrites the lists in place on each merge pass; flattening that
 into one array with an offset table is possible and would make `apply_merge`
 rewrite the whole corpus rather than one word. Batching is an array of
@@ -117,8 +161,8 @@ encodings by definition.
 (`load_merges`), `src/unigram.tw` (`set_logp`, `fit`, `validate`),
 `src/encoding.tw` (`specials_from`, `register_extra`, `pad_to`,
 `pad_batch_longest`), `src/embed.tw` (`check_ids`, `batch_ids`, `batch_mask`)
-**Status:** done for everything this entry named (2026-08, on twill 1.7). The
-out-parameter pattern is gone from the package entirely; a plain
+**Status:** DELIVERED AND USED, for everything this entry named (2026-08, on
+twill 1.7). The out-parameter pattern is gone from the package entirely; a plain
 empty-string-on-success return survives in places where nothing is returned
 alongside it, and that is a different and much smaller thing.
 
@@ -183,9 +227,13 @@ That the distinction was invisible is the argument for the whole entry.
 **Needs:** a function value passed as a parameter, and a spelling for its type
 **Used by:** nothing today, and `src/encoding.tw` (`build_single`,
 `build_pair`) wants it
-**Status:** functions are values in numeric twill; whether a systems-mode
-function may take one, and how the type is spelled, is not stated anywhere.
-loom's `docs/needs.md` entry 3 asks the same question for its step function.
+**Status:** DELIVERED, NOT WIRED UP. The question this entry asked is answered:
+on 1.7.1 a systems-mode function takes a function value and the type is spelled
+`Fn(I64) -> I64`, which I checked by writing and running one. loom's
+`docs/needs.md` entry 3 asked the same question for its step function.
+
+No file in `src/` declares an `Fn` parameter, so the seam below is unbuilt and
+the mismatch it describes is still silent. This is skein's work now.
 
 skein's five models all produce `Pieces` and all have the same shape, and the
 natural design is for `build_single` to take the model's encode function.
@@ -194,17 +242,21 @@ Instead every call site calls the model itself and passes the resulting
 a model was trained with is the one it is being encoded with. That mismatch is
 silent and produces subtly wrong tokenisation.
 
-## Blocking: features the source assumes exist
+## Was blocking: features the source assumes exist
 
 ### 7. Integer division and modulo on `I64`
 
 **Used by:** `src/vocab.tw` (`to_hex` uses `shr` and `and` instead, which is why
 they are written that way), `src/sequence.tw` (`bucket`)
-**Status:** twill's NEEDS-24 and NEEDS-44 both ask for this. **This entry
-duplicates NEEDS-24 and NEEDS-44**, which are themselves duplicates of each
-other.
+**Status:** DELIVERED. On 1.7.1, `/` on two `I64` is integer division (`7 / 2`
+is `3`) and `%` is the remainder (`7 % 2` is `1`). Untyped literals are a
+separate matter: a bare `7 / 2` at the top of a systems-mode file prints `3.5`,
+so the annotations matter. NEEDS-24 and NEEDS-44 are
+closed. **This entry duplicated NEEDS-24 and NEEDS-44**, which were themselves
+duplicates of each other.
 
-`vocab.to_hex` extracts nibbles with `shr` and `and` rather than `/ 16` and
+Neither call site has been changed and neither should be. `vocab.to_hex`
+extracts nibbles with `shr` and `and` rather than `/ 16` and
 `% 16`. That is arguably better code and it was not a choice: with a power of
 two the shift is available and correct, and if the base were ten it would not
 be. `sequence.bucket` steps an index by the batch size and compares, which is
@@ -213,14 +265,13 @@ the loop it would write anyway.
 ### 8. `f64_log`, and the float conversions in systems mode
 
 **Used by:** `src/unigram.tw` (`fit`, and `UNREACHABLE` as a literal)
-**Status:** twill's NEEDS-40 covers `F64` in systems mode with the conversions,
-and NEEDS-68 covers the transcendental primitives. **This entry duplicates
-NEEDS-40 and NEEDS-68.**
+**Status:** DELIVERED AND USED. `F64`, `f64_of_i64` and `f64_log` all work in
+systems mode on 1.7.1. `src/unigram.tw` calls both in `fit` and
+`tests/unigram_test.tw` passes. NEEDS-40 and NEEDS-68 are closed as far as
+skein is concerned. **This entry duplicated NEEDS-40 and NEEDS-68.**
 
-The unigram model is log probabilities and it cannot be written without a
-logarithm and without `f64_of_i64`. There is no workaround; the entry is here
-because a reader who assumes the numeric half of the language is available in
-systems mode will be surprised, and because it is a second repository asking.
+The unigram model is log probabilities and it could not be written without a
+logarithm and without `f64_of_i64`. There was no workaround.
 
 `UNREACHABLE` is `-1e18` written out as a decimal literal, standing in for
 negative infinity. A real negative infinity would be better and the literal is
@@ -231,9 +282,11 @@ reach the sentinel from below.
 
 **Used by:** every error message in the package, `src/vocab.tw` (`save`,
 `pair_key` in `src/bpe.tw`)
-**Status:** twill's NEEDS-45 covers `str()` on `I64`, NEEDS-35 and NEEDS-99
-cover `Str` concatenation with `+`. **This entry duplicates NEEDS-45, NEEDS-35
-and NEEDS-99.**
+**Status:** DELIVERED AND USED. `str()` on `I64` and `+` on `Str` both work;
+every error message and `bpe.pair_key` depend on them and the suite passes.
+NEEDS-45, NEEDS-35 and NEEDS-99 are closed. **This entry duplicated NEEDS-45,
+NEEDS-35 and NEEDS-99.** What is left below is skein's own performance note,
+not a language request.
 
 `bpe.pair_key` builds a dictionary key as `str(len(a)) + ":" + a + b`, which is
 the length-prefixed encoding that makes the key unambiguous when a symbol can
@@ -244,23 +297,29 @@ better. There is no way to spell one.
 ### 10. `i64_of_str`
 
 **Used by:** `src/vocab.tw` (`load`)
-**Status:** twill's NEEDS-19 asks for it. **This entry duplicates NEEDS-19.**
+**Status:** DELIVERED AND USED, including the part this entry cared about.
+NEEDS-19 shipped, and it shipped returning an `Opt`: `i64_of_str("12")` is
+`Some(12)`, so a parse failure and a legitimate zero are distinguishable, which
+is what this entry said was missing beyond the function itself. **This entry
+duplicated NEEDS-19.**
 
-The vocabulary file's frequency column and its two header numbers are parsed
-with `i64_of_str`. What is missing beyond the function itself is a way to tell a
-parse failure from a legitimate zero: `i64_of_str("banana")` and
-`i64_of_str("0")` must be distinguishable, and with no `Opt` they are not. A
-corrupt frequency currently loads as zero, which does not break anything today
-because frequencies are informational after a vocabulary is built, and would
-break silently the moment anything reads them.
+skein has not taken all of it. `vocab.load` goes through a helper `i64_or(s,
+fallback)` that matches the `Opt` and substitutes a fallback, which is -1 for a
+count or an id and is caught by the bounds checks that follow, and 0 for a
+frequency. So the frequency column still cannot tell `banana` from `0`, exactly
+as this entry described, and it is now a choice in `src/vocab.tw` rather than a
+missing feature. Making `load` refuse a non-numeric frequency by line number is
+a small change and `tests/vocab_test.tw` is where the assertion goes.
 
 ### 11. `chr(n)`
 
 **Used by:** `tests/normalize_test.tw`, `tests/pretok_test.tw`,
 `tests/simple_test.tw`, `tests/vocab_test.tw` and `tests/bpe_test.tw`, to write
 individual bytes in test fixtures; `examples/pipeline.tw`
-**Status:** twill's NEEDS-34 asks for `chr(n)` for a single byte. **This entry
-duplicates NEEDS-34.**
+**Status:** DELIVERED AND USED. NEEDS-34 shipped; `chr(65)` is `A` on 1.7.1.
+`examples/pipeline.tw` builds its accented fixture as
+`chr(195) + chr(169)` and the tests named above build theirs the same way.
+**This entry duplicated NEEDS-34.**
 
 Every test in this repository that covers non-ASCII behaviour builds its fixture
 byte by byte, because a `.tw` source file containing a literal accented
@@ -276,7 +335,7 @@ import the library under test to build their inputs.
 **Would improve:** `src/encoding.tw` (`TRUNC_RIGHT`, `TRUNC_LEFT`,
 `TRUNC_LONGEST_FIRST`, `PAD_RIGHT`, `PAD_LEFT`, and the if-chains in
 `build_single` and `build_pair`), `src/pretok.tw` (the choice of pre-tokeniser)
-**Status:** RESOLVED in 1.6, which shipped NEEDS-3.
+**Status:** DELIVERED AND USED. Resolved in 1.6, which shipped NEEDS-3.
 
 The five constants are now two enums, `Trunc` and `Pad`. The four copies of
 `if strategy == TRUNC_LEFT { left } else { right }` collapsed into one
@@ -326,7 +385,10 @@ over someone else's vocabulary.
 
 **Would improve:** `src/normalize.tw` (`strip_control`), `src/wordpiece.tw`
 (`encode_word`), `src/encoding.tw` (`is_special_id`)
-**Status:** twill's NEEDS-12 asks for it. **This entry duplicates NEEDS-12.**
+**Status:** DELIVERED, NOT WIRED UP. NEEDS-12 shipped; `continue` works in a
+`while` on 1.7.1. No file in `src/` uses it, so all three functions named above
+still have the shape this entry complained about. **This entry duplicated
+NEEDS-12.**
 
 `strip_control` is a three-deep if-else where two of the branches only advance
 the cursor. With `continue` it is a guard and a body. The nesting is the kind
@@ -335,32 +397,42 @@ that survives review and then acquires a fourth case.
 ### 16. A test runner
 
 **Would improve:** `tests/`
-**Status:** none. `tests/harness.tw` is a hand-rolled counter and `report` calls
-`exit(1)`. loom's entry 15 and spool's say the same thing.
+**Status:** DELIVERED. `twill test tests` exists on 1.7.1 and is exactly what
+this entry asked for: it collects the `*_test.tw` files, runs each one and
+reports once.
 
-Every test file is a program that has to be run individually. `tests/harness.tw`
-is now the third byte-for-byte copy of the same file in this ecosystem, which is
-two more than there should be, and each copy is a place the assertion set can
-drift. A `twill test` that collected `*_test.tw`, ran each in a fresh
-interpreter and reported once would delete all three.
+```
+11 file(s): 11 passed, 0 failed
+```
+
+It is what CI runs and what the README tells a reader to run, and no test file
+is invoked individually anywhere any more.
+
+`tests/harness.tw` is still here and is still the third byte-for-byte copy of
+the same file in this ecosystem. The runner replaced the invocation, not the
+assertions: `check`, `equal_str` and the rest are skein's own and `twill test`
+does not provide them. Deleting the three copies needs assertions in the
+toolchain, which is a smaller ask than this entry made and should be its own
+entry when someone writes it. loom's entry 15 and spool's are the same
+situation.
 
 ### 17. A tensor built from an `Arr[I64]`
 
 **Needs:** a conversion from `Arr[I64]` to a 1-D integer `Tensor`, or a
 `gather` that accepts an `Arr[I64]` directly
 **Used by:** `src/embed.tw` (`embed`, `batch_ids`)
-**Status:** `std/nn`'s `embedding(p, ids)` is documented as taking "a 1-D tensor
-or list of integer row indices"; whether an `Arr[I64]` is one of those in
-systems mode is not stated. Twill's NEEDS-62 (`Nested`) and NEEDS-25 (a foreign
-call into the native tensor core) are the nearest existing entries.
-**This entry overlaps NEEDS-62 and NEEDS-25.**
+**Status:** DELIVERED, and the assumption is now checked. An `Arr[I64]` is
+accepted where `std/nn`'s `embedding(p, ids)` wants row indices, and there is
+also a `tensor(a)` that turns an `Arr[I64]` into a 1-D integer tensor
+(`tensor([1, 2, 3], shape=[3])`), which is the conversion this entry asked for
+in case it was not. Twill's NEEDS-62 (`Nested`) and NEEDS-25 (a foreign call
+into the native tensor core) were the nearest existing entries.
+**This entry overlapped NEEDS-62 and NEEDS-25.**
 
-skein passes an `Arr[I64]` and assumes it is accepted. If it is not, every
-tokenised batch needs a copy into a tensor, which is one allocation per batch
-and is fine, and it needs a way to spell that copy, which does not exist. This
-is the single point where skein touches the numeric half of the language and it
-is the one interface in the package that has not been checked against a real
-implementation of anything.
+skein passes an `Arr[I64]` and it is accepted: `tests/embed_test.tw` passes and
+`examples/pipeline.tw` embeds a real batch and prints its shape. This was the
+one interface in the package that had not been checked against a real
+implementation of anything, and it has been.
 
 Since this was written, the numeric half grew narrow dtypes (twill
 `docs/dtypes.md`), which sharpens what the conversion should produce rather than
@@ -371,5 +443,9 @@ bool. So the conversion this entry asks for is specifically `Arr[I64]` to an i32
 each column at the boundary so a consumer builds them narrow. The embedding
 output is a separate matter and needs nothing: `embed` is dtype-transparent, the
 table's dtype flows straight through gather, so a bf16 table returns bf16 rows
-with no widening. The gap is still the one interface unchecked against a real
-tensor implementation; it is just better specified now.
+with no widening. What is left of this entry is dtype and not acceptance:
+`src/encoding.tw` documents the intended dtype of each column at the boundary,
+and nothing in skein asserts it, because skein hands over an `Arr[I64]` and does
+not choose the dtype the consumer builds from it. That is a documented seam
+rather than a missing feature, and it is the reason this entry stays open at
+all.

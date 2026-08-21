@@ -8,7 +8,7 @@ mode systems
 #
 #   twill run examples/pipeline.tw
 #
-# It does not run. See the README.
+# It runs, and CI runs it. The README has its output.
 
 import "../src/normalize.tw" as nm
 import "../src/pretok.tw" as pt

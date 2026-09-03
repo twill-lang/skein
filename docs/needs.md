@@ -117,13 +117,18 @@ first, and `tests/vocab_test.tw` has the assertions that would catch it.
 **Needs:** a sort over `Arr[T]` with a caller-supplied comparison
 **Used by:** `src/vocab.tw` (`sort_index`, called by `build`),
 `src/sequence.tw` (`sort_by_length`, called by `bucket`)
-**Status:** OPEN. 1.7.1 has `sort`, which refuses a list whose elements are not
-strings ("sort on a list expects every element to be a string") and takes no
-comparison function; there is no `sort_by`. NEEDS-23 asked for sorting an
-`Arr[Str]` and that is what shipped. **This entry duplicates NEEDS-23** and
-widens it, and the widening is the part still missing: skein needs a comparison
-over two parallel arrays, not over the elements of one, so neither of the two
-sorts below can be deleted.
+**Status: delivered in twill 1.9.0, and both sorts are gone.** `sort` takes a
+comparison over the two elements, which is what the widening in this entry asked
+for: skein sorts an index array by comparing through arrays the closure
+captures, so a key function would not have done. `vocab.sort_index` and
+`sequence.sort_by_length` are each a call and a copy-back now.
+
+The builtin is stable in every form, which this entry needed and said so: id
+assignment has to be a function of the data alone.
+
+What it said while it was open: 1.7.1's `sort` refused a list whose elements
+were not strings and took no comparison function, NEEDS-23 having asked only for
+`Arr[Str]`. That is why neither of the two sorts below could be deleted.
 
 skein has written two sorts. `vocab.sort_index` is a bottom-up merge sort over
 an index array, because a vocabulary is tens of thousands of entries and it has

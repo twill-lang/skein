@@ -213,59 +213,31 @@ fn ranks_before(fa: I64, ta: Str, fb: I64, tb: Str) -> Bool {
   str_less(ta, tb)
 }
 
-# Merge sort over an index array. Merge rather than insertion because a
-# vocabulary is tens of thousands of entries and the quadratic version is
-# minutes; merge rather than quicksort because it is stable and because stable
-# plus a total tie-break means the order is a function of the data alone.
+# The builtin sort over an index array, ordered by `ranks_before`.
 #
-# `docs/needs.md` entry 5: twill's NEEDS-23 asks for a sort in the language, and
-# this is the third copy of one in the ecosystem.
+# This was a bottom-up merge sort until twill 1.9.0, written because the builtin
+# refused a list of anything but strings and took no comparison, and this sort
+# keys on two *other* arrays rather than on the elements of the one being
+# sorted. `docs/needs.md` entry 3 is exactly that ask, and the builtin's
+# comparison takes the two elements rather than a key for exactly this case: the
+# closure reaches `freqs` and `toks`.
+#
+# Merge and not quicksort was the old choice because the sort has to be stable.
+# It still has to be, and the builtin still is: stability plus a total tie-break
+# is what makes the id assignment a function of the data alone, and a vocabulary
+# that reassigns ids between two runs over one corpus invalidates every
+# checkpoint trained against it.
+#
+# Written back into `idx` rather than returned, because every caller owns the
+# array it passes and expects it sorted in place.
 fn sort_index(idx: Arr[I64], freqs: Arr[I64], toks: Arr[Str]) {
-  let n: I64 = len(idx)
-  if n < 2 {
-    return
-  }
-  let buf: Arr[I64] = []
+  let ordered: Arr[I64] = sort(idx, fn(x: I64, y: I64) -> Bool {
+    ranks_before(freqs[x], toks[x], freqs[y], toks[y])
+  })
   let i: I64 = 0
-  while i < n {
-    push(buf, 0)
+  while i < len(idx) {
+    idx[i] = ordered[i]
     i = i + 1
-  }
-  let width: I64 = 1
-  while width < n {
-    let lo: I64 = 0
-    while lo < n {
-      let mid: I64 = lo + width
-      let hi: I64 = lo + width + width
-      if mid > n { mid = n }
-      if hi > n { hi = n }
-      let a: I64 = lo
-      let b: I64 = mid
-      let o: I64 = lo
-      while o < hi {
-        let take_left: Bool = false
-        if a < mid and b < hi {
-          take_left = ranks_before(freqs[idx[a]], toks[idx[a]], freqs[idx[b]], toks[idx[b]])
-        } else {
-          take_left = a < mid
-        }
-        if take_left {
-          buf[o] = idx[a]
-          a = a + 1
-        } else {
-          buf[o] = idx[b]
-          b = b + 1
-        }
-        o = o + 1
-      }
-      lo = hi
-    }
-    let k: I64 = 0
-    while k < n {
-      idx[k] = buf[k]
-      k = k + 1
-    }
-    width = width + width
   }
 }
 

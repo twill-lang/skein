@@ -187,28 +187,26 @@ fn bucket(items: Arr[encoding.Encoding], batch_size: I64, pool: I64) -> Arr[enco
   out
 }
 
-# Insertion sort on the index array, by ascending encoding length.
+# The builtin sort on the index array, by ascending encoding length.
 #
-# Insertion and not merge, unlike `src/vocab.tw`, and the reason is the `pool`
-# argument above: this sorts runs of `pool` items, which is a few hundred at
-# most in every configuration that makes sense, and insertion sort is stable,
-# has no scratch array and is faster than merge sort at that size. Sorting the
-# whole corpus at once (`pool` 0) is the case where this is quadratic, and it is
-# the inference case, where it happens once.
+# This was an insertion sort until twill 1.9.0, for a reason that no longer
+# decides anything: the builtin refused a list of anything but strings and took
+# no comparison, so a sort keyed on a *second* array was not expressible at all.
+# It is now, and the comparison below is the same predicate the insertion sort
+# used, written once instead of woven through a loop.
 #
-# Stability matters: two encodings of the same length keep their input order, so
-# whatever shuffled the input still governs.
+# Stability still matters and the builtin still has it: two encodings of the same
+# length keep their input order, so whatever shuffled the input still governs.
+#
+# It writes the result back into `idx` rather than returning a new array, because
+# every caller passes an array it owns and expects sorted in place.
 fn sort_by_length(idx: Arr[I64], items: Arr[encoding.Encoding]) {
-  let i: I64 = 1
+  let ordered: Arr[I64] = sort(idx, fn(x: I64, y: I64) -> Bool {
+    encoding.length(items[x]) < encoding.length(items[y])
+  })
+  let i: I64 = 0
   while i < len(idx) {
-    let cur: I64 = idx[i]
-    let curlen: I64 = encoding.length(items[cur])
-    let j: I64 = i - 1
-    while j >= 0 and encoding.length(items[idx[j]]) > curlen {
-      idx[j + 1] = idx[j]
-      j = j - 1
-    }
-    idx[j + 1] = cur
+    idx[i] = ordered[i]
     i = i + 1
   }
 }

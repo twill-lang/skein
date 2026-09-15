@@ -413,13 +413,30 @@ reports once.
 It is what CI runs and what the README tells a reader to run, and no test file
 is invoked individually anywhere any more.
 
-`tests/harness.tw` is still here and is still the third byte-for-byte copy of
-the same file in this ecosystem. The runner replaced the invocation, not the
-assertions: `check`, `equal_str` and the rest are skein's own and `twill test`
-does not provide them. Deleting the three copies needs assertions in the
-toolchain, which is a smaller ask than this entry made and should be its own
-entry when someone writes it. loom's entry 15 and spool's are the same
-situation.
+The assertions arrived in twill 1.11 as `std/test`, and skein's copy is gone
+with them: every suite imports `std/test` as `t`, with the same `check`,
+`equal_str`, `equal_i64`, `near` and `report` it called before. `report`
+returns the status rather than calling `exit`, and prints the summary in the
+shape the runner reads, so `twill test` now shows the counts beside every file
+(371 assertions across the eleven) where the hand-written line, `bpe: 45
+passed, 0 failed`, gave it nothing it could parse.
+
+One thing the move found, recorded so nobody repeats it. `equal_opt_i64` was
+the one assertion `std/test` does not have, and the obvious place for it is a
+helper module on top of `std/test`. That helper would import its own instance
+of the module, with its own counter, and every failure it recorded would be
+invisible to the suite's `report`: a two-line probe did exactly that and came
+back `0 passed, 0 failed` and `ok`. So `tests/harness.tw` keeps only the
+formatter `opt_str`, and the five suites that need `equal_opt_i64` define it
+in three lines on top of `t.equal_str`.
+
+*What the entry said before:* `tests/harness.tw` is still here and is still
+the third byte-for-byte copy of the same file in this ecosystem. The runner
+replaced the invocation, not the assertions: `check`, `equal_str` and the rest
+are skein's own and `twill test` does not provide them. Deleting the three
+copies needs assertions in the toolchain, which is a smaller ask than this
+entry made and should be its own entry when someone writes it. loom's entry 15
+and spool's are the same situation.
 
 ### 17. A tensor built from an `Arr[I64]`
 

@@ -1,6 +1,6 @@
 mode systems
 
-import "harness.tw" as t
+import "std/test" as t
 import "../src/unigram.tw" as ug
 import "../src/vocab.tw" as vb
 import "../src/pieces.tw" as pc

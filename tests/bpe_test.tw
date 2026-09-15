@@ -1,10 +1,17 @@
 mode systems
 
-import "harness.tw" as t
+import "std/test" as t
+import "harness.tw" as h
 import "../src/bpe.tw" as bpe
 import "../src/vocab.tw" as vb
 import "../src/pieces.tw" as pc
 import "../src/pretok.tw" as pt
+
+# Local rather than in harness.tw, for the reason given there: a helper that
+# imports std/test records into its own counter, not this file's.
+fn equal_opt_i64(name: Str, got: Opt[I64], want: Opt[I64]) {
+  t.equal_str(name, h.opt_str(got), h.opt_str(want))
+}
 
 # As in tests/vocab_test.tw: `load_merges` returns a `Res`, and the assertions
 # below are either "this must load" or "this must be refused".
@@ -30,7 +37,7 @@ fn the_base_alphabet_is_every_byte() {
   t.equal_i64("256 base tokens", vb.size(m.v), 256)
   t.check("byte zero is in the vocabulary", vb.contains(m.v, chr(0)))
   t.check("byte 255 is in the vocabulary", vb.contains(m.v, chr(255)))
-  t.equal_opt_i64("byte 65 is at id 65 with no reserved tokens",
+  equal_opt_i64("byte 65 is at id 65 with no reserved tokens",
                   vb.id_of(m.v, chr(65)), Some(65))
 }
 
@@ -39,7 +46,7 @@ fn reserved_tokens_push_the_alphabet_up_by_their_count() {
   let r: Arr[Str] = ["[PAD]", "[CLS]"]
   let m: bpe.Bpe = bpe.train(docs, 0, 2, r, false, false)
   t.equal_i64("258 tokens", vb.size(m.v), 258)
-  t.equal_opt_i64("byte 65 moved up by two", vb.id_of(m.v, chr(65)), Some(67))
+  equal_opt_i64("byte 65 moved up by two", vb.id_of(m.v, chr(65)), Some(67))
 }
 
 fn training_merges_the_most_frequent_pair_first() {

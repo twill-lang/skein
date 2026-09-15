@@ -1,6 +1,6 @@
 mode systems
 
-import "harness.tw" as t
+import "std/test" as t
 import "../src/pretok.tw" as pt
 
 fn whitespace_splitting_records_the_span_of_every_run() {

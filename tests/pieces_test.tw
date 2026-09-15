@@ -1,6 +1,6 @@
 mode systems
 
-import "harness.tw" as t
+import "std/test" as t
 import "../src/pieces.tw" as pc
 
 fn a_new_pieces_is_empty() {

@@ -26,18 +26,18 @@ here executed and this section said so. twill 1.6 is the release that closed it:
 the 11 test suites under `tests/` pass, and CI runs them against a released
 twill on every push rather than gating on the prose in this file.
 
-You need twill 1.7.0 or newer. Get a binary from the twill releases; there is
+You need twill 1.12.0 or newer. Get a binary from the twill releases; there is
 no build step, because there is nothing here but twill source.
 
 ```bash
 curl -fsSL -o twill \
-  https://github.com/twill-lang/twill/releases/download/v1.7.1/twill-v1.7.1-linux-amd64
+  https://github.com/twill-lang/twill/releases/download/v1.12.0/twill-v1.12.0-linux-amd64
 chmod +x twill
 ./twill --version
 ```
 
-The asset name is `twill-v1.7.1-<os>-<arch>`, and the assets that exist for
-v1.7.1 are `linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64` and
+The asset name is `twill-v1.12.0-<os>-<arch>`, and the assets that exist for
+v1.12.0 are `linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64` and
 `windows-amd64.exe`. Substitute yours.
 
 Then, from the project root:
@@ -47,17 +47,17 @@ twill test tests
 ```
 
 ```
-ok    tests\bpe_test.tw
-ok    tests\embed_test.tw
-ok    tests\encoding_test.tw
-ok    tests\normalize_test.tw
-ok    tests\pieces_test.tw
-ok    tests\pretok_test.tw
-ok    tests\sequence_test.tw
-ok    tests\simple_test.tw
-ok    tests\unigram_test.tw
-ok    tests\vocab_test.tw
-ok    tests\wordpiece_test.tw
+ok    tests/bpe_test.tw  (45 passed, 0 failed)
+ok    tests/embed_test.tw  (19 passed, 0 failed)
+ok    tests/encoding_test.tw  (61 passed, 0 failed)
+ok    tests/normalize_test.tw  (34 passed, 0 failed)
+ok    tests/pieces_test.tw  (13 passed, 0 failed)
+ok    tests/pretok_test.tw  (31 passed, 0 failed)
+ok    tests/sequence_test.tw  (35 passed, 0 failed)
+ok    tests/simple_test.tw  (24 passed, 0 failed)
+ok    tests/unigram_test.tw  (24 passed, 0 failed)
+ok    tests/vocab_test.tw  (58 passed, 0 failed)
+ok    tests/wordpiece_test.tw  (27 passed, 0 failed)
 
 11 file(s): 11 passed, 0 failed
 ```
@@ -93,9 +93,10 @@ embedded row 0: 14 positions of 64
 mask: 42 entries
 ```
 
-Both output blocks are pasted from a run of twill 1.7.1 on Windows, which is
-where the path separator in the first one comes from. CI runs the same two
-commands on linux-amd64 on every push.
+Both output blocks are pasted from a run of twill 1.12.0 on macOS. The counts
+beside each file are there because the suites report through `std/test`,
+whose summary line the runner reads. CI runs the same two commands on
+linux-amd64 on every push.
 
 The two tokens at `17..18` and `18..19` are the two bytes of `é` printed one at
 a time, so what you actually see there is whatever your terminal does with half

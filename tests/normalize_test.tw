@@ -1,6 +1,6 @@
 mode systems
 
-import "harness.tw" as t
+import "std/test" as t
 import "../src/normalize.tw" as nm
 
 # The `Norm` a normalisation is expected to produce. `apply` returns a

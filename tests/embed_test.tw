@@ -5,7 +5,7 @@ mode systems
 # testing `std/nn` rather than skein, and because the seam this file exists to
 # guard is entirely on skein's side of the call.
 
-import "harness.tw" as t
+import "std/test" as t
 import "../src/embed.tw" as em
 import "../src/encoding.tw" as enc
 

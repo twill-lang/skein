@@ -2,6 +2,22 @@
 
 ## v0.1.0 (unreleased)
 
+### Changed
+
+- **The assertions are `std/test`, and the pin is twill 1.12.0.** twill 1.11
+  ships the assertions the test runner already assumed, which is what
+  `docs/needs.md` entry 16 said would delete skein's copy of them. Every suite
+  imports `std/test` as `t` and calls the same names it did before. `report`
+  returns the status instead of calling `exit`, and prints its summary in the
+  shape `twill test` reads, so the runner shows the counts beside each file:
+  371 assertions across eleven suites, where before it showed none.
+  `tests/harness.tw` keeps one formatter, `opt_str`, and nothing that counts.
+  A helper importing `std/test` gets its own counter, so a failure it recorded
+  would never reach the suite's `report`; that was measured with a probe that
+  came back green with a failure in it, and the five suites that compare an
+  `Opt[I64]` define `equal_opt_i64` locally on top of `t.equal_str` for that
+  reason. `spool.toml`, CI and the README's install line move to 1.12.0.
+
 First cut of skein, the text and sequence library for twill, written in twill.
 
 It runs on twill 1.7. `twill test tests` is 11 files, 11 passed, 0 failed, and

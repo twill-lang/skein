@@ -1,6 +1,7 @@
 mode systems
 
-import "harness.tw" as t
+import "std/test" as t
+import "harness.tw" as h
 import "../src/encoding.tw" as enc
 import "../src/normalize.tw" as nm
 import "../src/vocab.tw" as vb
@@ -19,6 +20,12 @@ fn must_id(v: vb.Vocab, tok: Str) -> I64 {
   }
 }
 import "../src/simple.tw" as sp
+
+# Local rather than in harness.tw, for the reason given there: a helper that
+# imports std/test records into its own counter, not this file's.
+fn equal_opt_i64(name: Str, got: Opt[I64], want: Opt[I64]) {
+  t.equal_str(name, h.opt_str(got), h.opt_str(want))
+}
 
 # The refusal message from a result that is expected to carry one, and "" from a
 # success. The functions these assertions call return `Res[Unit, Str]` now
@@ -189,7 +196,7 @@ fn padding_marks_the_padded_positions_with_a_zero_mask() {
   t.equal_i64("five long", enc.length(e), 5)
   t.equal_i64("the real tokens are masked in", e.mask[0], 1)
   t.equal_i64("and the padding is masked out", e.mask[4], 0)
-  t.equal_opt_i64("padding uses the PAD id", Some(e.ids[4]), vb.id_of(v, "[PAD]"))
+  equal_opt_i64("padding uses the PAD id", Some(e.ids[4]), vb.id_of(v, "[PAD]"))
   t.equal_i64("and carries an empty span", e.starts[4], -1)
 }
 
@@ -252,7 +259,7 @@ fn an_empty_special_name_means_the_model_does_not_have_one() {
   # `specials` aborts on a refusal, so reaching the next line is the assertion
   # that an empty name is accepted rather than reported.
   let s: enc.Specials = specials(enc.specials_from(v, "", "", "[PAD]", "[UNK]", ""))
-  t.equal_opt_i64("CLS is unconfigured", s.cls_id, None)
+  equal_opt_i64("CLS is unconfigured", s.cls_id, None)
   t.equal_i64("and contributes no overhead", enc.overhead_single(s), 0)
 }
 

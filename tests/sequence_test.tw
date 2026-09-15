@@ -1,6 +1,6 @@
 mode systems
 
-import "harness.tw" as t
+import "std/test" as t
 import "../src/sequence.tw" as sq
 import "../src/encoding.tw" as enc
 import "../src/normalize.tw" as nm

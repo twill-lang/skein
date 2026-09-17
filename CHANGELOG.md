@@ -4,6 +4,12 @@
 
 ### Changed
 
+- **Take twill 1.13.0.** twill 1.13.0 is released, so the pin follows it.
+  `spool.toml`, CI and the README install line move from 1.12.0 to 1.13.0. This
+  is a currency bump: the code still runs on twill 1.7, no source or test
+  changed, and the eleven suites pass unchanged on 1.13.0. The output blocks in
+  the README stay labelled as a 1.12.0 run, because that is where they were
+  pasted from and their counts did not move.
 - **The assertions are `std/test`, and the pin is twill 1.12.0.** twill 1.11
   ships the assertions the test runner already assumed, which is what
   `docs/needs.md` entry 16 said would delete skein's copy of them. Every suite

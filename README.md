@@ -339,8 +339,8 @@ because the vocabulary was rebuilt and the checkpoint was not), and calls
 
 ## Install
 
-To run the tests or the example, clone the repository and point a twill 1.7
-binary at it; the section at the top has the commands and their output. There is
+To run the tests or the example, clone the repository and point a twill 1.11.0
+(or newer) binary at it; the section at the top has the commands and their output. There is
 no build step.
 
 To use skein from another project, via spool:

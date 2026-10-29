@@ -26,7 +26,8 @@ here executed and this section said so. twill 1.6 is the release that closed it:
 the 11 test suites under `tests/` pass, and CI runs them against a released
 twill on every push rather than gating on the prose in this file.
 
-You need twill 1.19.0 or newer. Get a binary from the twill releases; there is
+You need twill 1.11.0 or newer. CI tests against 1.19.0, which is what
+`spool.toml` pins. Get a binary from the twill releases; there is
 no build step, because there is nothing here but twill source.
 
 ```bash

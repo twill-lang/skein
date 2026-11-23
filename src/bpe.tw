@@ -257,10 +257,11 @@ fn train(docs: Arr[Str], wanted: I64, min_pair_freq: I64, reserved: Arr[Str],
   let wc: vocab.Counts = corpus_words(m, docs, split_punct)
   let words: Arr[Arr[Str]] = []
   let counts: Arr[I64] = []
+  let seen: Arr[Str] = vocab.tokens(wc)
   let i: I64 = 0
-  while i < len(wc.keys) {
-    push(words, explode(wc.keys[i]))
-    push(counts, vocab.count_of(wc, wc.keys[i]))
+  while i < len(seen) {
+    push(words, explode(seen[i]))
+    push(counts, vocab.count_of(wc, seen[i]))
     i = i + 1
   }
 

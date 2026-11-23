@@ -144,42 +144,39 @@ fn is_reserved(v: Vocab, id: I64) -> Bool = id >= 0 and id < v.reserved
 
 # A frequency table with a deterministic iteration order.
 #
-# `keys` duplicates the dict's key set. The subset's dicts iterate in insertion
-# order (docs/self-hosting.md section 1.2) so this is redundant in principle,
-# but there is no way to iterate a `Dict` from twill source today
-# (`docs/needs.md` entry 4), so the array is how this file reads its own table
-# back. It also fixes the order at first-seen rather than at whatever the
-# runtime does, which is the property `build` needs for its tie-break.
+# The order is first-seen, and it comes from the `Dict` itself: twill's
+# `Dict[Str, V]` keeps insertion order and `dict_keys` returns it (twill's
+# NEEDS-8). This struct used to carry a parallel `keys: Arr[Str]` because there
+# was no way to read a dict's keys back from twill source; that array and the
+# dict could disagree and only the discipline of `observe` kept them in step.
 struct Counts {
   n: Dict[Str, I64],
-  keys: Arr[Str],
   total: I64,
 }
 
 fn new_counts() -> Counts {
   let d: Dict[Str, I64] = {}
-  let k: Arr[Str] = []
-  Counts { n: d, keys: k, total: 0 }
+  Counts { n: d, total: 0 }
 }
 
 fn observe(c: Counts, tok: Str, times: I64) {
-  if dict_has(c.n, tok) {
-    c.n[tok] = c.n[tok] + times
-  } else {
-    c.n[tok] = times
-    push(c.keys, tok)
-  }
+  c.n[tok] = count_of(c, tok) + times
   c.total = c.total + times
 }
 
+# The observed tokens in first-seen order. A fresh array on every call, so a
+# caller that walks it more than once takes it once.
+fn tokens(c: Counts) -> Arr[Str] = dict_keys(c.n)
+
+# One hash, through the `Opt`, rather than `dict_has` and then an index.
 fn count_of(c: Counts, tok: Str) -> I64 {
-  if dict_has(c.n, tok) {
-    return c.n[tok]
+  match dict_get(c.n, tok) {
+    Some(n) => n,
+    None => 0,
   }
-  0
 }
 
-fn distinct(c: Counts) -> I64 = len(c.keys)
+fn distinct(c: Counts) -> I64 = len(c.n)
 
 # ---- ordering ---------------------------------------------------------------
 
@@ -262,25 +259,22 @@ fn build(c: Counts, reserved: Arr[Str], unk: Str, min_freq: I64, max_size: I64) 
   let v: Vocab = new_vocab()
   add_reserved(v, reserved, unk)
 
+  let keys: Arr[Str] = tokens(c)
   let idx: Arr[I64] = []
-  let i: I64 = 0
-  while i < len(c.keys) {
-    push(idx, i)
-    i = i + 1
-  }
   let freqs: Arr[I64] = []
-  i = 0
-  while i < len(c.keys) {
-    push(freqs, count_of(c, c.keys[i]))
+  let i: I64 = 0
+  while i < len(keys) {
+    push(idx, i)
+    push(freqs, count_of(c, keys[i]))
     i = i + 1
   }
-  sort_index(idx, freqs, c.keys)
+  sort_index(idx, freqs, keys)
 
   let limit: I64 = max_size
   i = 0
   while i < len(idx) {
     let k: I64 = idx[i]
-    let tok: Str = c.keys[k]
+    let tok: Str = keys[k]
     let f: I64 = freqs[k]
     if f < min_freq {
       # Sorted by descending frequency, so the first token below the cutoff is

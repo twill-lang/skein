@@ -18,8 +18,8 @@ because how ugly a workaround is measures how badly the feature is wanted.
 | # | Entry | State |
 | --- | --- | --- |
 | 1 | Unicode character database | open |
-| 2 | `Dict` membership and iteration | delivered, iteration not wired up |
-| 3 | Sorting with a caller-supplied comparison | open |
+| 2 | `Dict` membership and iteration | delivered and used |
+| 3 | Sorting with a caller-supplied comparison | delivered and used |
 | 4 | Nested containers | delivered and used |
 | 5 | `Res[T, E]` | delivered and used |
 | 6 | A function type | delivered, not wired up |
@@ -83,12 +83,11 @@ end of this.
 **Needs:** `dict_has(d, k) -> Bool`, and a way to iterate a `Dict`'s keys
 **Used by:** `src/vocab.tw` (`id_of`, `contains`, `observe`, `count_of`,
 `load`), `src/bpe.tw` (`rank_of`, `count_pairs`, `load_merges`)
-**Status:** DELIVERED, and the iteration half is NOT WIRED UP. The lookup half
-was resolved in 1.6 (NEEDS-22) and skein uses it. Iteration (NEEDS-8) arrived
-too: 1.7.1 has `dict_keys(d)`, which returns the keys as an `Arr`. There is
-still no `for` over a `Dict` itself. No file in `src/` calls `dict_keys`, so
-every parallel key array described below is still there and is now skein's debt
-rather than the language's.
+**Status:** DELIVERED AND USED. The lookup half was resolved in 1.6
+(NEEDS-22). The iteration half is twill's NEEDS-8: `dict_keys(d)` returns the
+keys as an `Arr` in insertion order, and twill documents that order rather than
+leaving it to the runtime (setting `z`, `a`, `m` gives `[z, a, m]`). There is
+still no `for` over a `Dict` itself, and skein does not need one.
 
 `dict_get` returns `Opt[V]`, which is what this entry said would be better than
 `dict_has` plus an index. `vocab.id_of` and `bpe.rank_of` are both one
@@ -96,21 +95,16 @@ rather than the language's.
 `dict_has` followed by an index hashed the key twice, and those two functions
 are the innermost lookups in the package.
 
-Iteration is worked around below, and the workaround is no longer forced.
+`vocab.Counts` no longer carries a parallel `keys` array. `vocab.tokens(c)` is
+`dict_keys(c.n)`, `vocab.build` and `bpe.train` walk that, and `observe` writes
+one structure instead of two, so the invariant that the array and the dict agree
+is gone rather than kept by discipline. The order was the thing to check before
+removing it: `tests/vocab_test.tw` asserts that a re-counted token keeps its
+first-seen place, and fails if an update re-inserts the key.
 
-Iteration is worked around by keeping a parallel `Arr` of the keys next to every
-`Dict`: `vocab.Counts` has `keys`, `vocab.Vocab` has `toks`. That doubles the
-memory of a frequency table and it is a real invariant to maintain, because the
-array and the dictionary can disagree and nothing checks that they do not.
-`vocab.observe` is the only function allowed to write either, which is how the
-invariant is kept, and it is kept by discipline rather than by the type.
-
-Removing the parallel arrays is not a mechanical substitution of `dict_keys`,
-which is why it has not happened yet. The arrays carry insertion order, and
-`vocab.build` assigns ids from that order so that a vocabulary is a function of
-the data alone; `dict_keys` is not documented to return keys in insertion order
-and skein has not established that it does. Whoever does this has to check that
-first, and `tests/vocab_test.tw` has the assertions that would catch it.
+`vocab.Vocab.toks` stays, and it is not a workaround. It is the id-to-token
+direction a decoder reads on every output token, and walking the dict for it
+would be linear whatever order the dict kept.
 
 ### 3. Sorting
 

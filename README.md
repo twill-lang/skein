@@ -26,19 +26,19 @@ here executed and this section said so. twill 1.6 is the release that closed it:
 the 11 test suites under `tests/` pass, and CI runs them against a released
 twill on every push rather than gating on the prose in this file.
 
-You need twill 1.11.0 or newer. CI tests against 1.19.0, which is what
+You need twill 1.11.0 or newer. CI tests against 1.19.1, which is what
 `spool.toml` pins. Get a binary from the twill releases; there is
 no build step, because there is nothing here but twill source.
 
 ```bash
 curl -fsSL -o twill \
-  https://github.com/twill-lang/twill/releases/download/v1.19.0/twill-v1.19.0-linux-amd64
+  https://github.com/twill-lang/twill/releases/download/v1.19.1/twill-v1.19.1-linux-amd64
 chmod +x twill
 ./twill --version
 ```
 
-The asset name is `twill-v1.19.0-<os>-<arch>`, and the assets that exist for
-v1.19.0 are `linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64` and
+The asset name is `twill-v1.19.1-<os>-<arch>`, and the assets that exist for
+v1.19.1 are `linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64` and
 `windows-amd64.exe`. Substitute yours.
 
 Then, from the project root:

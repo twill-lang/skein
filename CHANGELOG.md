@@ -4,6 +4,14 @@
 
 ### Changed
 
+- **`vocab.Counts` reads its keys from the dict.** The parallel `keys` array is
+  gone: `vocab.tokens(c)` is `dict_keys(c.n)`, which twill documents as
+  insertion order, and `build` and `bpe.train` walk that. `observe` now writes
+  one structure, so there is no array-and-dict invariant left to keep, and
+  `count_of` is one hash instead of two. `vocab_test` now also asserts that a
+  re-counted token keeps its first-seen place. `docs/needs.md` entry 2 is
+  delivered and used, and the table row for entry 3, which still said open
+  after sorting landed in 1.9.0, is corrected.
 - **Take twill 1.13.0.** twill 1.13.0 is released, so the pin follows it.
   `spool.toml`, CI and the README install line move from 1.12.0 to 1.13.0. This
   is a currency bump: the code still runs on twill 1.7, no source or test

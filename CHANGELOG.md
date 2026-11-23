@@ -4,6 +4,11 @@
 
 ### Changed
 
+- **Take twill 1.19.1.** twill 1.19.1 is released, so the pin follows it.
+  `spool.toml`, CI and the README install line move from 1.19.0 to 1.19.1. This
+  is a currency bump: no source or test changed, and the eleven suites pass
+  unchanged on 1.19.1. 1.19.1 fixes `tensor()` on an `Arr[I64]` filled from
+  typed variables (twill-lang/twill#73).
 - **`vocab.Counts` reads its keys from the dict.** The parallel `keys` array is
   gone: `vocab.tokens(c)` is `dict_keys(c.n)`, which twill documents as
   insertion order, and `build` and `bpe.train` walk that. `observe` now writes
